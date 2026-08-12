@@ -1,0 +1,12 @@
+# build output
+mote
+*.o
+*.dSYM/
+
+# model weights and tokenizer (fetch with scripts/download_model.sh)
+models/*.bin
+
+# editor / OS noise
+.DS_Store
+.vscode/
+compile_commands.json
