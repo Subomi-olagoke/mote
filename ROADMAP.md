@@ -14,15 +14,16 @@ coherent text from a pretrained model.
 - [x] Sampling: greedy, temperature, top-p
 - [x] CLI with reproducible seeds and tokens/sec reporting
 
-## 2. Quantize — next
+## 2. Quantize — done (int8)
 
 Get the model small enough to be interesting on constrained hardware, with the
 quantized arithmetic written by hand rather than pulled from a library.
 
-- [ ] Q8_0-style symmetric int8 weights with per-group scales
-- [ ] An integer-aware `matmul` that dequantizes on the fly
-- [ ] A converter that turns an fp32 checkpoint into mote's own quantized format
-- [ ] Measure the quality/size tradeoff honestly (perplexity vs bytes)
+- [x] Q8_0-style symmetric int8 weights with per-group scales
+- [x] An integer-aware `matmul` that quantizes activations and folds scales in
+- [x] A converter (`tools/quantize.c`) that writes mote's own `.mq` format
+- [x] One binary auto-detects fp32 vs `.mq` and runs either
+- [x] Measured: 3.6x smaller on the 15M model, ~0.0003 RMS/weight, quality held
 - [ ] Explore sub-8-bit (int4) for the weight-heavy layers
 
 ## 3. Onto a microcontroller — the point

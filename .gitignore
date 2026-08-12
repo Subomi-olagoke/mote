@@ -3,8 +3,12 @@ mote
 *.o
 *.dSYM/
 
+# build output
+quantize
+
 # model weights and tokenizer (fetch with scripts/download_model.sh)
 models/*.bin
+models/*.mq
 
 # editor / OS noise
 .DS_Store

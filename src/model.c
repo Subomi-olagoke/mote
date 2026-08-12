@@ -1,25 +1,21 @@
 /* model.c — load a checkpoint and stand up the transformer.
  *
- * The checkpoint is memory-mapped, not read into a buffer: the weights are the
- * overwhelming majority of the file, they never change, and mmap lets the OS
- * page them in on demand and share them across processes for free. All the
- * Weights pointers are just offsets into that one mapping.
- *
- * The on-disk layout is the compact format the TinyStories models ship in: a
- * seven-int Config header, then every weight tensor back to back as float32 in
- * a fixed order. A negative vocab_size in the header is the one flag it carries,
- * it means the output classifier is stored separately rather than tied to the
- * token embedding.
+ * Two formats, one loader. The first int32 of the file decides: mote's magic
+ * means a quantized .mq checkpoint, anything else is a legacy fp32 .bin (whose
+ * first int is `dim`). Both are memory-mapped; the weight pointers, float or
+ * QTensor, are just offsets into that one mapping.
  */
 #include "model.h"
 
 #include <fcntl.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
-static void map_weights(Weights *w, const Config *p, float *ptr, int shared)
+/* ---- fp32 layout ---- */
+static void map_weights_fp32(Weights *w, const Config *p, float *ptr, int shared)
 {
     int head_size = p->dim / p->n_heads;
     unsigned long long n_layers = p->n_layers;
@@ -35,14 +31,48 @@ static void map_weights(Weights *w, const Config *p, float *ptr, int shared)
     w->w2 = ptr;              ptr += n_layers * p->hidden_dim * p->dim;
     w->w3 = ptr;              ptr += n_layers * p->dim * p->hidden_dim;
     w->rms_final = ptr;       ptr += p->dim;
-    /* Older exports parked the RoPE frequency tables here. We recompute those
-     * on the fly, so skip the space to land on the classifier. */
-    ptr += p->seq_len * head_size / 2;
+    ptr += p->seq_len * head_size / 2;   /* skip old RoPE tables */
     ptr += p->seq_len * head_size / 2;
     w->wcls = shared ? w->token_embedding : ptr;
 }
 
-static void alloc_state(RunState *s, const Config *p)
+/* ---- quantized layout ---- */
+static char *map_qtensor(QTensor *qt, char *p, long size, int gs)
+{
+    qt->q = (int8_t *)p;
+    p += size * (long)sizeof(int8_t);
+    qt->s = (float *)p;
+    p += (size / gs) * (long)sizeof(float);
+    return p;
+}
+
+static void map_weights_quant(Weights *w, const Config *p, int gs, int shared,
+                              char *base)
+{
+    long L = p->n_layers, D = p->dim, HD = p->hidden_dim;
+    int head_size = p->dim / p->n_heads;
+    long kv = (long)(p->n_kv_heads * head_size);
+
+    /* norms stay fp32, first in the payload */
+    w->rms_att = (float *)base;   base += L * D * sizeof(float);
+    w->rms_ffn = (float *)base;   base += L * D * sizeof(float);
+    w->rms_final = (float *)base; base += D * sizeof(float);
+
+    base = map_qtensor(&w->q_tokens, base, (long)p->vocab_size * D, gs);
+    base = map_qtensor(&w->q_wq, base, L * D * D, gs);
+    base = map_qtensor(&w->q_wk, base, L * D * kv, gs);
+    base = map_qtensor(&w->q_wv, base, L * D * kv, gs);
+    base = map_qtensor(&w->q_wo, base, L * D * D, gs);
+    base = map_qtensor(&w->q_w1, base, L * D * HD, gs);
+    base = map_qtensor(&w->q_w2, base, L * HD * D, gs);
+    base = map_qtensor(&w->q_w3, base, L * D * HD, gs);
+    if (shared)
+        w->q_wcls = w->q_tokens;
+    else
+        map_qtensor(&w->q_wcls, base, (long)p->vocab_size * D, gs);
+}
+
+static void alloc_state(RunState *s, const Config *p, int quantized, int gs)
 {
     int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
     s->x   = calloc(p->dim, sizeof(float));
@@ -55,6 +85,17 @@ static void alloc_state(RunState *s, const Config *p)
     s->logits = calloc(p->vocab_size, sizeof(float));
     s->key_cache   = calloc((size_t)p->n_layers * p->seq_len * kv_dim, sizeof(float));
     s->value_cache = calloc((size_t)p->n_layers * p->seq_len * kv_dim, sizeof(float));
+
+    /* scratch to hold whichever activation feeds a matmul, quantized. Sized to
+     * the widest activation (hidden_dim >= dim). */
+    if (quantized) {
+        int w = p->hidden_dim > p->dim ? p->hidden_dim : p->dim;
+        s->xq.q = calloc(w, sizeof(int8_t));
+        s->xq.s = calloc(w / gs, sizeof(float));
+    } else {
+        s->xq.q = NULL;
+        s->xq.s = NULL;
+    }
 
     if (!s->x || !s->xb || !s->xb2 || !s->hb || !s->hb2 || !s->q || !s->att ||
         !s->logits || !s->key_cache || !s->value_cache) {
@@ -69,32 +110,59 @@ static void free_state(RunState *s)
     free(s->hb); free(s->hb2); free(s->q);
     free(s->att); free(s->logits);
     free(s->key_cache); free(s->value_cache);
+    free(s->xq.q); free(s->xq.s);
+}
+
+static void map_file(Transformer *t, const char *path)
+{
+    t->fd = open(path, O_RDONLY);
+    if (t->fd == -1) { fprintf(stderr, "mote: open() failed on %s\n", path); exit(1); }
+    off_t sz = lseek(t->fd, 0, SEEK_END);
+    t->file_size = sz;
+    t->data = mmap(NULL, sz, PROT_READ, MAP_PRIVATE, t->fd, 0);
+    if (t->data == MAP_FAILED) { fprintf(stderr, "mote: mmap failed\n"); exit(1); }
 }
 
 void build_transformer(Transformer *t, const char *path)
 {
+    /* peek the first int to choose the format */
     FILE *f = fopen(path, "rb");
     if (!f) { fprintf(stderr, "mote: couldn't open checkpoint %s\n", path); exit(1); }
-    if (fread(&t->config, sizeof(Config), 1, f) != 1) {
-        fprintf(stderr, "mote: couldn't read config header from %s\n", path);
-        exit(1);
+    int32_t magic = 0;
+    if (fread(&magic, sizeof(int32_t), 1, f) != 1) {
+        fprintf(stderr, "mote: couldn't read %s\n", path); exit(1);
     }
-    int shared = t->config.vocab_size > 0;
-    t->config.vocab_size = abs(t->config.vocab_size);
-    fseek(f, 0, SEEK_END);
-    t->file_size = ftell(f);
     fclose(f);
 
-    t->fd = open(path, O_RDONLY);
-    if (t->fd == -1) { fprintf(stderr, "mote: open() failed on %s\n", path); exit(1); }
-    t->data = mmap(NULL, t->file_size, PROT_READ, MAP_PRIVATE, t->fd, 0);
-    if (t->data == MAP_FAILED) { fprintf(stderr, "mote: mmap failed\n"); exit(1); }
+    map_file(t, path);
+    char *bytes = (char *)t->data;
 
-    /* Config is 7 int32s == 7 float32s wide; weights begin right after it. */
-    float *weights_ptr = t->data + sizeof(Config) / sizeof(float);
-    map_weights(&t->weights, &t->config, weights_ptr, shared);
+    if (magic == MQ_MAGIC) {
+        t->quantized = 1;
+        int32_t *h = (int32_t *)bytes;
+        /* h[0]=magic, h[1]=version, h[2..8]=Config, h[9]=gs, h[10]=shared */
+        if (h[1] != MQ_VERSION) {
+            fprintf(stderr, "mote: unsupported .mq version %d\n", h[1]); exit(1);
+        }
+        t->config = *(Config *)(h + 2);
+        t->gs = h[9];
+        int shared = h[10];
+        if (t->gs <= 0 || (t->config.dim % t->gs) || (t->config.hidden_dim % t->gs)) {
+            fprintf(stderr, "mote: bad group size %d for this model\n", t->gs); exit(1);
+        }
+        map_weights_quant(&t->weights, &t->config, t->gs, shared, bytes + MQ_HEADER);
+    } else {
+        t->quantized = 0;
+        t->gs = 0;
+        Config *c = (Config *)bytes;
+        t->config = *c;
+        int shared = t->config.vocab_size > 0;
+        t->config.vocab_size = abs(t->config.vocab_size);
+        float *weights_ptr = (float *)bytes + sizeof(Config) / sizeof(float);
+        map_weights_fp32(&t->weights, &t->config, weights_ptr, shared);
+    }
 
-    alloc_state(&t->state, &t->config);
+    alloc_state(&t->state, &t->config, t->quantized, t->gs);
 }
 
 void free_transformer(Transformer *t)

@@ -1,27 +1,44 @@
 /* model.h — the transformer: its weights, its scratch memory, and its forward
  * pass. This is the whole engine's public surface.
+ *
+ * One binary runs two kinds of checkpoint. The legacy fp32 format (the
+ * TinyStories .bin files) keeps every weight as a float. mote's own quantized
+ * format (.mq) stores the big matrices as int8 with per-group scales; it starts
+ * with a magic number so the loader can tell the two apart.
  */
 #ifndef MOTE_MODEL_H
 #define MOTE_MODEL_H
 
 #include <sys/types.h>
 #include "config.h"
+#include "quant.h"
 
-/* Pointers into the memory-mapped checkpoint. Nothing here is owned or copied;
- * every field just names a region of the mapped file. */
+/* mote quantized format. The magic is the ASCII "mote" read as a little-endian
+ * int32, which cannot collide with a legacy header (whose first int is `dim`). */
+#define MQ_MAGIC   0x65746F6D
+#define MQ_VERSION 1
+#define MQ_HEADER  256          /* header padded to this, keeps weights aligned */
+
+/* Weight tensors. In the fp32 path the `float *` fields are live and the
+ * QTensors are empty; in the quantized path it is the other way around, except
+ * the norm gains, which stay fp32 in both because they are small and sensitive. */
 typedef struct {
-    float *token_embedding;   /* (vocab, dim)                          */
-    float *rms_att;           /* (layer, dim)   pre-attention norm gain */
-    float *rms_ffn;           /* (layer, dim)   pre-ffn norm gain       */
-    float *wq;                /* (layer, dim, n_heads*head_size)        */
-    float *wk;                /* (layer, dim, n_kv_heads*head_size)     */
-    float *wv;                /* (layer, dim, n_kv_heads*head_size)     */
-    float *wo;                /* (layer, n_heads*head_size, dim)        */
-    float *w1;                /* (layer, hidden_dim, dim)  gate         */
-    float *w2;                /* (layer, dim, hidden_dim)  down         */
-    float *w3;                /* (layer, hidden_dim, dim)  up           */
-    float *rms_final;         /* (dim)   final norm gain                */
-    float *wcls;              /* (vocab, dim)  classifier; may alias emb */
+    /* always fp32 */
+    float *rms_att;           /* (layer, dim)  pre-attention norm gain  */
+    float *rms_ffn;           /* (layer, dim)  pre-ffn norm gain        */
+    float *rms_final;         /* (dim)         final norm gain          */
+
+    /* fp32 path */
+    float *token_embedding;   /* (vocab, dim)                           */
+    float *wq, *wk, *wv, *wo; /* attention                              */
+    float *w1, *w2, *w3;      /* ffn                                    */
+    float *wcls;              /* (vocab, dim)  classifier               */
+
+    /* quantized path (same tensors, int8 + scales) */
+    QTensor q_tokens;
+    QTensor q_wq, q_wk, q_wv, q_wo;
+    QTensor q_w1, q_w2, q_w3;
+    QTensor q_wcls;
 } Weights;
 
 /* Per-step working memory. Allocated once, reused every token. */
@@ -36,18 +53,22 @@ typedef struct {
     float *logits; /* (vocab)      output distribution             */
     float *key_cache;   /* (layer, seq_len, kv_dim)                */
     float *value_cache; /* (layer, seq_len, kv_dim)                */
+    QTensor xq;    /* scratch: the current activation, quantized   */
 } RunState;
 
 typedef struct {
     Config  config;
     Weights weights;
     RunState state;
+    int    quantized;  /* 0 = fp32 path, 1 = quantized path        */
+    int    gs;         /* quantization group size (quantized only) */
     int    fd;         /* file descriptor of the mmap'd checkpoint */
-    float *data;       /* mmap base                                */
+    void  *data;       /* mmap base                                */
     ssize_t file_size;
 } Transformer;
 
-/* Map the checkpoint, wire up the weight pointers, allocate scratch memory. */
+/* Map the checkpoint (either format, auto-detected), wire up the weight
+ * pointers, allocate scratch memory. */
 void build_transformer(Transformer *t, const char *checkpoint_path);
 
 /* Release scratch memory and unmap the checkpoint. */

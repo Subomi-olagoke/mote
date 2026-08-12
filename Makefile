@@ -2,6 +2,7 @@
 #
 #   make          optimized single-thread build   -> ./mote
 #   make omp      multi-threaded (needs OpenMP)    -> ./mote
+#   make quantize the fp32 -> int8 converter       -> ./quantize
 #   make debug    warnings + sanitizers            -> ./mote
 #   make clean
 
@@ -14,13 +15,17 @@ BIN     := mote
 $(BIN): $(SRC)
 	$(CC) $(CFLAGS) -o $@ $(SRC) $(LDLIBS)
 
-.PHONY: omp debug clean
+.PHONY: omp quantize debug clean
 omp: $(SRC)
 	$(CC) $(CFLAGS) -fopenmp -o $(BIN) $(SRC) $(LDLIBS)
+
+# the converter reuses the engine's quantization core
+quantize: tools/quantize.c src/quant.c
+	$(CC) $(CFLAGS) -o $@ tools/quantize.c src/quant.c $(LDLIBS)
 
 debug: $(SRC)
 	$(CC) -O1 -g -std=c11 -Wall -Wextra -fsanitize=address,undefined \
 	      -o $(BIN) $(SRC) $(LDLIBS)
 
 clean:
-	rm -f $(BIN)
+	rm -f $(BIN) quantize

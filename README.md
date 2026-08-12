@@ -31,6 +31,14 @@ make                              # builds ./mote, needs only a C compiler
 ./mote models/stories15M.bin -i "Once upon a time"
 ```
 
+Or run it quantized, about 4x smaller and noticeably faster:
+
+```bash
+make quantize                                        # builds the converter
+./quantize models/stories15M.bin models/stories15M.mq
+./mote models/stories15M.mq -i "Once upon a time"    # int8, same output quality
+```
+
 Options:
 
 ```
@@ -55,7 +63,9 @@ The engine is small enough to hold in your head:
 | `src/forward.c` | one token through the network, the core of the whole thing |
 | `src/tokenizer.c` | byte-pair encode/decode between text and token ids |
 | `src/sampler.c` | greedy, temperature, and top-p sampling |
+| `src/quant.c` | int8 quantization: the pack, dequant, and the int8 matmul |
 | `src/mote.c` | the CLI and the generation loop |
+| `tools/quantize.c` | converts an fp32 checkpoint to the quantized `.mq` format |
 
 The model is a standard Llama-style decoder: pre-norm blocks, each with
 grouped-query attention and a SwiGLU feed-forward, RMSNorm throughout, and
@@ -71,14 +81,27 @@ it is the only thing touched by optional multithreading:
 make omp      # OpenMP build, if your compiler has it
 ```
 
+## Quantization
+
+`mote` also runs int8. The converter packs each big weight matrix into 8-bit
+integers with one fp32 scale per group of values (symmetric "Q8_0" quantization),
+and the runtime does the matmul in int8, quantizing each activation on the fly
+and folding the scales back in per group. The norm gains stay fp32.
+
+One binary runs both: a checkpoint's first bytes say whether it is fp32 or `.mq`,
+and the engine picks the path. On the 15M model, int8 is about **3.6x smaller**
+on disk (61 MB to 17 MB) with a per-weight RMS error near 0.0003, and generates
+the same quality of text. Because the weights are a quarter of the size, it is
+also markedly faster to run, memory bandwidth is the bottleneck, not arithmetic.
+
 ## Roadmap
 
 `mote` is being built in three milestones, from the general to the absurd. See
 [ROADMAP.md](ROADMAP.md).
 
 1. **Inference in pure C** — done. This is what you are running now.
-2. **Quantize** the weights to 8-bit and below, with the math by hand, so the
-   model shrinks to a couple of megabytes.
+2. **Quantize** the weights to 8-bit, with the math by hand — done, about 4x
+   smaller. int4 for the weight-heavy layers is still open.
 3. **Onto a microcontroller** — run it on a chip, not a computer.
 
 ## Acknowledgements
