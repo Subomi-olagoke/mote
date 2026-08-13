@@ -27,9 +27,14 @@ quantize: tools/quantize.c src/quant.c src/parallel.c
 blob2c: tools/blob2c.c
 	$(CC) $(CFLAGS) -o $@ tools/blob2c.c
 
+# measure model quality (perplexity), for comparing fp32 vs quantized
+ENGINE := src/model.c src/forward.c src/quant.c src/tokenizer.c src/sampler.c src/parallel.c
+perplexity: tools/perplexity.c $(ENGINE)
+	$(CC) $(CFLAGS) -o $@ tools/perplexity.c $(ENGINE) $(LDLIBS)
+
 debug: $(SRC)
 	$(CC) -O1 -g -std=c11 -Wall -Wextra -fsanitize=address,undefined \
 	      -o $(BIN) $(SRC) $(LDLIBS)
 
 clean:
-	rm -f $(BIN) quantize blob2c
+	rm -f $(BIN) quantize blob2c perplexity

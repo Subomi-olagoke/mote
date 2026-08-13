@@ -16,3 +16,5 @@ models/*.mq
 .DS_Store
 .vscode/
 compile_commands.json
+
+perplexity

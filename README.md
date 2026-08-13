@@ -90,9 +90,11 @@ and folding the scales back in per group. The norm gains stay fp32.
 
 One binary runs both: a checkpoint's first bytes say whether it is fp32 or `.mq`,
 and the engine picks the path. On the 15M model, int8 is about **3.6x smaller**
-on disk (61 MB to 17 MB) with a per-weight RMS error near 0.0003, and generates
-the same quality of text. Because the weights are a quarter of the size, it is
-also markedly faster to run, memory bandwidth is the bottleneck, not arithmetic.
+on disk (61 MB to 17 MB). And the quality is measured, not asserted: `make
+perplexity` scores a model over held-out text, and int8 lands at **2.915**
+perplexity against fp32's **2.912**, a 0.1% cost for a quarter of the size.
+Because the weights are a quarter of the size, it is also markedly faster to
+run, memory bandwidth is the bottleneck, not arithmetic.
 
 ## Roadmap
 
