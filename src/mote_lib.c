@@ -51,8 +51,23 @@ mote *mote_create_from_files(const char *model_path, const char *tok_path)
     return m;
 }
 
+void mote_get_info(const mote *m, mote_info_t *out)
+{
+    if (!m || !out)
+        return;
+    const Config *c = &m->t.config;
+    out->dim = c->dim;
+    out->hidden_dim = c->hidden_dim;
+    out->n_layers = c->n_layers;
+    out->n_heads = c->n_heads;
+    out->n_kv_heads = c->n_kv_heads;
+    out->vocab_size = c->vocab_size;
+    out->seq_len = c->seq_len;
+    out->quantized = m->t.quantized;
+}
+
 int mote_generate(mote *m, const char *prompt, const mote_params *p,
-                  void (*on_token)(const char *piece, void *user), void *user)
+                  int (*on_token)(const char *piece, void *user), void *user)
 {
     if (!m)
         return 0;
@@ -95,10 +110,10 @@ int mote_generate(mote *m, const char *prompt, const mote_params *p,
             break;
 
         const char *piece = decode(&m->tk, token, next);
-        if (piece && on_token)
-            on_token(piece, user);
         token = next;
         generated++;
+        if (piece && on_token && !on_token(piece, user))
+            break;   /* caller asked to stop */
     }
 
     free(prompt_tokens);

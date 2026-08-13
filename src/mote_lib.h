@@ -25,6 +25,14 @@ typedef struct {
     int   max_tokens;           /* 0 = the model's max sequence length */
 } mote_params;
 
+/* A model's shape, for showing what is actually running. */
+typedef struct {
+    int dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, seq_len;
+    int quantized;              /* 1 if the loaded model is int8       */
+} mote_info_t;
+
+void mote_get_info(const mote *m, mote_info_t *out);
+
 /* Create an engine from a model blob and a tokenizer blob already in memory.
  * The caller may free both blobs after this returns... except the model, which
  * must stay alive for the engine's lifetime (its weights are used in place).
@@ -39,9 +47,10 @@ mote *mote_create(const void *model, size_t model_len,
 mote *mote_create_from_files(const char *model_path, const char *tokenizer_path);
 
 /* Generate a continuation of `prompt`. For each decoded piece of text, calls
- * on_token(piece, user). Returns the number of tokens generated. */
+ * on_token(piece, user); return 0 from it to stop early, non-zero to continue.
+ * Returns the number of tokens generated. */
 int mote_generate(mote *m, const char *prompt, const mote_params *params,
-                  void (*on_token)(const char *piece, void *user), void *user);
+                  int (*on_token)(const char *piece, void *user), void *user);
 
 void mote_free(mote *m);
 
