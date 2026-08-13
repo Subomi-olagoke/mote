@@ -8,6 +8,8 @@
 #ifndef MOTE_TOKENIZER_H
 #define MOTE_TOKENIZER_H
 
+#include <stddef.h>
+
 typedef struct {
     const char *str;
     int id;
@@ -23,6 +25,12 @@ typedef struct {
 } Tokenizer;
 
 void build_tokenizer(Tokenizer *tk, const char *path, int vocab_size);
+
+/* Load the tokenizer from a blob already in memory (the app bundle on iOS,
+ * flash on an MCU). The caller may free the blob afterwards; strings are copied. */
+void build_tokenizer_from_blob(Tokenizer *tk, const void *blob, size_t size,
+                               int vocab_size);
+
 void free_tokenizer(Tokenizer *tk);
 
 /* Decode one token to a printable piece, given the previous token for the

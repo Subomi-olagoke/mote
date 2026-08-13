@@ -9,6 +9,7 @@
  */
 #include "tokenizer.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,7 +19,8 @@ static int compare_tokens(const void *a, const void *b)
     return strcmp(((const TokenIndex *)a)->str, ((const TokenIndex *)b)->str);
 }
 
-void build_tokenizer(Tokenizer *tk, const char *path, int vocab_size)
+void build_tokenizer_from_blob(Tokenizer *tk, const void *blob, size_t size,
+                               int vocab_size)
 {
     tk->vocab_size = vocab_size;
     tk->vocab  = malloc(vocab_size * sizeof(char *));
@@ -29,24 +31,49 @@ void build_tokenizer(Tokenizer *tk, const char *path, int vocab_size)
         tk->byte_pieces[i * 2 + 1] = '\0';
     }
 
-    FILE *f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "mote: couldn't open tokenizer %s\n", path); exit(1); }
-    if (fread(&tk->max_token_length, sizeof(int), 1, f) != 1) {
+    const uint8_t *p = (const uint8_t *)blob;
+    const uint8_t *end = p + size;
+
+    if (p + sizeof(int) > end) {
         fprintf(stderr, "mote: bad tokenizer header\n"); exit(1);
     }
+    memcpy(&tk->max_token_length, p, sizeof(int));
+    p += sizeof(int);
+
     for (int i = 0; i < vocab_size; i++) {
-        int len;
-        if (fread(tk->scores + i, sizeof(float), 1, f) != 1 ||
-            fread(&len, sizeof(int), 1, f) != 1) {
+        if (p + sizeof(float) + sizeof(int) > end) {
             fprintf(stderr, "mote: truncated tokenizer\n"); exit(1);
         }
-        tk->vocab[i] = malloc(len + 1);
-        if (fread(tk->vocab[i], 1, len, f) != (size_t)len) {
+        memcpy(tk->scores + i, p, sizeof(float));
+        p += sizeof(float);
+        int len;
+        memcpy(&len, p, sizeof(int));
+        p += sizeof(int);
+        if (len < 0 || p + len > end) {
             fprintf(stderr, "mote: truncated tokenizer string\n"); exit(1);
         }
+        tk->vocab[i] = malloc(len + 1);
+        memcpy(tk->vocab[i], p, len);
+        p += len;
         tk->vocab[i][len] = '\0';
     }
+}
+
+void build_tokenizer(Tokenizer *tk, const char *path, int vocab_size)
+{
+    /* desktop convenience: read the file into memory, then parse the blob */
+    FILE *f = fopen(path, "rb");
+    if (!f) { fprintf(stderr, "mote: couldn't open tokenizer %s\n", path); exit(1); }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *buf = malloc(sz > 0 ? (size_t)sz : 1);
+    if (!buf || sz < 0 || fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
+        fprintf(stderr, "mote: couldn't read tokenizer %s\n", path); exit(1);
+    }
     fclose(f);
+    build_tokenizer_from_blob(tk, buf, (size_t)sz, vocab_size);
+    free(buf);   /* vocab strings were copied out, so the buffer is done */
 }
 
 void free_tokenizer(Tokenizer *tk)
