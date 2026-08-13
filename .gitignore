@@ -5,6 +5,8 @@ mote
 
 # build output
 quantize
+blob2c
+*_blob.c
 
 # model weights and tokenizer (fetch with scripts/download_model.sh)
 models/*.bin

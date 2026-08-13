@@ -36,7 +36,9 @@ a chatbot, and that is exactly the charm.
 - [x] Load the model from a memory blob, not a file
       (`build_transformer_from_blob`); the portable core has no files or
       platform calls. Desktop mmaps, an MCU points at flash, iOS at the bundle.
-- [ ] Emit the model as a linkable flash blob / partition (a tool)
+- [x] Emit the model as a linkable flash blob (`blob2c`) and run the engine from
+      it with zero files opened. Verified on the host with stories260K: weights
+      in a `const` array (flash), coherent generation, no filesystem.
 - [ ] Fixed buffers behind a static arena, no heap on the hot path
 - [ ] Stream generated tokens out over USB serial
 - [ ] Report the real numbers: tokens/sec and memory, no hand-waving
