@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -123,46 +124,57 @@ static void map_file(Transformer *t, const char *path)
     if (t->data == MAP_FAILED) { fprintf(stderr, "mote: mmap failed\n"); exit(1); }
 }
 
-void build_transformer(Transformer *t, const char *path)
+/* Portable core: parse a model blob already in memory and wire up the
+ * transformer. No files, no mmap, no platform calls. This is exactly what runs
+ * on a microcontroller (blob in flash) or inside an iOS app (blob in the
+ * bundle); the desktop path just mmaps a file and calls in here. */
+static void init_from_blob(Transformer *t, const uint8_t *base)
 {
-    /* peek the first int to choose the format */
-    FILE *f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "mote: couldn't open checkpoint %s\n", path); exit(1); }
-    int32_t magic = 0;
-    if (fread(&magic, sizeof(int32_t), 1, f) != 1) {
-        fprintf(stderr, "mote: couldn't read %s\n", path); exit(1);
-    }
-    fclose(f);
-
-    map_file(t, path);
-    char *bytes = (char *)t->data;
+    int32_t magic;
+    memcpy(&magic, base, sizeof(magic));
 
     if (magic == MQ_MAGIC) {
         t->quantized = 1;
-        int32_t *h = (int32_t *)bytes;
+        const int32_t *h = (const int32_t *)base;
         /* h[0]=magic, h[1]=version, h[2..8]=Config, h[9]=gs, h[10]=shared */
         if (h[1] != MQ_VERSION) {
             fprintf(stderr, "mote: unsupported .mq version %d\n", h[1]); exit(1);
         }
-        t->config = *(Config *)(h + 2);
+        t->config = *(const Config *)(h + 2);
         t->gs = h[9];
         int shared = h[10];
         if (t->gs <= 0 || (t->config.dim % t->gs) || (t->config.hidden_dim % t->gs)) {
             fprintf(stderr, "mote: bad group size %d for this model\n", t->gs); exit(1);
         }
-        map_weights_quant(&t->weights, &t->config, t->gs, shared, bytes + MQ_HEADER);
+        map_weights_quant(&t->weights, &t->config, t->gs, shared, (char *)base + MQ_HEADER);
     } else {
         t->quantized = 0;
         t->gs = 0;
-        Config *c = (Config *)bytes;
-        t->config = *c;
+        t->config = *(const Config *)base;
         int shared = t->config.vocab_size > 0;
         t->config.vocab_size = abs(t->config.vocab_size);
-        float *weights_ptr = (float *)bytes + sizeof(Config) / sizeof(float);
+        float *weights_ptr = (float *)base + sizeof(Config) / sizeof(float);
         map_weights_fp32(&t->weights, &t->config, weights_ptr, shared);
     }
 
     alloc_state(&t->state, &t->config, t->quantized, t->gs);
+}
+
+void build_transformer_from_blob(Transformer *t, const void *blob, size_t size)
+{
+    /* the caller owns the blob; we neither map nor free it */
+    t->data = NULL;
+    t->fd = -1;
+    t->file_size = (ssize_t)size;
+    init_from_blob(t, (const uint8_t *)blob);
+}
+
+void build_transformer(Transformer *t, const char *path)
+{
+    /* desktop convenience: mmap the checkpoint, then hand the bytes to the
+     * portable core. free_transformer unmaps because we own t->data and t->fd. */
+    map_file(t, path);
+    init_from_blob(t, (const uint8_t *)t->data);
 }
 
 void free_transformer(Transformer *t)

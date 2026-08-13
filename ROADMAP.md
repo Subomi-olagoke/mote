@@ -33,9 +33,11 @@ a chatbot, and that is exactly the charm.
 
 - [ ] Pick a target with enough RAM (an ESP32-S3 with PSRAM is the honest
       starting line; smaller parts for the smallest models)
-- [ ] Replace file mmap with weights in flash / external PSRAM
-- [ ] Strip the desktop-only bits, fixed buffers, no dynamic allocation on the
-      hot path
+- [x] Load the model from a memory blob, not a file
+      (`build_transformer_from_blob`); the portable core has no files or
+      platform calls. Desktop mmaps, an MCU points at flash, iOS at the bundle.
+- [ ] Emit the model as a linkable flash blob / partition (a tool)
+- [ ] Fixed buffers behind a static arena, no heap on the hot path
 - [ ] Stream generated tokens out over USB serial
 - [ ] Report the real numbers: tokens/sec and memory, no hand-waving
 

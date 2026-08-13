@@ -9,6 +9,7 @@
 #ifndef MOTE_MODEL_H
 #define MOTE_MODEL_H
 
+#include <stddef.h>
 #include <sys/types.h>
 #include "config.h"
 #include "quant.h"
@@ -68,8 +69,15 @@ typedef struct {
 } Transformer;
 
 /* Map the checkpoint (either format, auto-detected), wire up the weight
- * pointers, allocate scratch memory. */
+ * pointers, allocate scratch memory. Desktop convenience wrapper over the
+ * portable loader below. */
 void build_transformer(Transformer *t, const char *checkpoint_path);
+
+/* Portable loader: bring the transformer up from a model blob already in
+ * memory, a flash address on a microcontroller, the app bundle on iOS, or an
+ * mmap on desktop. No files and no platform calls. The caller owns the blob and
+ * must keep it alive for the transformer's lifetime. */
+void build_transformer_from_blob(Transformer *t, const void *blob, size_t size);
 
 /* Release scratch memory and unmap the checkpoint. */
 void free_transformer(Transformer *t);
