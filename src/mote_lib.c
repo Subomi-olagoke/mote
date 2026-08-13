@@ -36,6 +36,21 @@ mote *mote_create(const void *model, size_t model_len,
     return m;
 }
 
+mote *mote_create_from_files(const char *model_path, const char *tok_path)
+{
+    if (!model_path || !tok_path)
+        return NULL;
+
+    mote *m = calloc(1, sizeof(*m));
+    if (!m)
+        return NULL;
+
+    build_transformer(&m->t, model_path);            /* mmaps the checkpoint */
+    build_tokenizer(&m->tk, tok_path, m->t.config.vocab_size);
+    build_sampler(&m->s, m->t.config.vocab_size, 1.0f, 0.9f, 1);
+    return m;
+}
+
 int mote_generate(mote *m, const char *prompt, const mote_params *p,
                   void (*on_token)(const char *piece, void *user), void *user)
 {

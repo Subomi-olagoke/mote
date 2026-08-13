@@ -32,6 +32,12 @@ typedef struct {
 mote *mote_create(const void *model, size_t model_len,
                   const void *tokenizer, size_t tokenizer_len);
 
+/* Convenience: create from files on disk. On iOS the bundled model and
+ * tokenizer have real paths, and this uses mmap, so there is no large copy and
+ * no pointer-lifetime concern. (The from-blob path above is for flash on an
+ * MCU, where there is no filesystem.) */
+mote *mote_create_from_files(const char *model_path, const char *tokenizer_path);
+
 /* Generate a continuation of `prompt`. For each decoded piece of text, calls
  * on_token(piece, user). Returns the number of tokens generated. */
 int mote_generate(mote *m, const char *prompt, const mote_params *params,
