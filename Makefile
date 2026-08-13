@@ -20,8 +20,8 @@ omp: $(SRC)
 	$(CC) $(CFLAGS) -fopenmp -o $(BIN) $(SRC) $(LDLIBS)
 
 # the converter reuses the engine's quantization core
-quantize: tools/quantize.c src/quant.c
-	$(CC) $(CFLAGS) -o $@ tools/quantize.c src/quant.c $(LDLIBS)
+quantize: tools/quantize.c src/quant.c src/parallel.c
+	$(CC) $(CFLAGS) -o $@ tools/quantize.c src/quant.c src/parallel.c $(LDLIBS)
 
 # emit a model as a const C array to link into firmware (weights in flash)
 blob2c: tools/blob2c.c

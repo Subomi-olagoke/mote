@@ -11,9 +11,14 @@
  * will come from.
  */
 #include "model.h"
+#include "parallel.h"
 
 #include <math.h>
 #include <string.h>
+
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 
 static void rmsnorm(float *out, const float *x, const float *weight, int size)
 {
@@ -39,16 +44,42 @@ static void softmax(float *x, int size)
         x[i] /= sum;
 }
 
+static inline float dot_f32(const float *a, const float *b, int n)
+{
+#if defined(__ARM_NEON)
+    float32x4_t acc = vdupq_n_f32(0.0f);
+    int i = 0;
+    for (; i + 4 <= n; i += 4)
+        acc = vfmaq_f32(acc, vld1q_f32(a + i), vld1q_f32(b + i));
+    float sum = vaddvq_f32(acc);
+    for (; i < n; i++)
+        sum += a[i] * b[i];
+    return sum;
+#else
+    float sum = 0.0f;
+    for (int i = 0; i < n; i++)
+        sum += a[i] * b[i];
+    return sum;
+#endif
+}
+
+typedef struct { float *out; const float *x, *w; int n; } MatmulF32;
+
+static void matmul_f32_range(int begin, int end, void *vctx)
+{
+    const MatmulF32 *c = (const MatmulF32 *)vctx;
+    for (int i = begin; i < end; i++)
+        c->out[i] = dot_f32(c->x, c->w + (long)i * c->n, c->n);
+}
+
 static void matmul_f32(float *out, const float *x, const float *w, int n, int d)
 {
-#pragma omp parallel for schedule(static)
-    for (int i = 0; i < d; i++) {
-        float val = 0.0f;
-        const float *row = w + (long)i * n;
-        for (int j = 0; j < n; j++)
-            val += row[j] * x[j];
-        out[i] = val;
-    }
+    MatmulF32 ctx = { out, x, w, n };
+    /* only thread when the work is worth the dispatch overhead (see quant.c) */
+    if ((long)d * n >= (1 << 18))
+        mote_parallel_for(d, matmul_f32_range, &ctx);
+    else
+        matmul_f32_range(0, d, &ctx);
 }
 
 /* out(d) = W(d, n) . in(n), taking the right path for this checkpoint. For fp32,
