@@ -48,7 +48,7 @@ static char *map_qtensor(QTensor *qt, char *p, long size, int gs)
 }
 
 static void map_weights_quant(Weights *w, const Config *p, int gs, int shared,
-                              char *base)
+                              int has_qkv_bias, char *base)
 {
     long L = p->n_layers, D = p->dim, HD = p->hidden_dim;
     int head_size = p->dim / p->n_heads;
@@ -58,6 +58,15 @@ static void map_weights_quant(Weights *w, const Config *p, int gs, int shared,
     w->rms_att = (float *)base;   base += L * D * sizeof(float);
     w->rms_ffn = (float *)base;   base += L * D * sizeof(float);
     w->rms_final = (float *)base; base += D * sizeof(float);
+
+    /* optional fp32 attention biases, right after the norms */
+    if (has_qkv_bias) {
+        w->bq = (float *)base; base += L * D * sizeof(float);
+        w->bk = (float *)base; base += L * kv * sizeof(float);
+        w->bv = (float *)base; base += L * kv * sizeof(float);
+    } else {
+        w->bq = w->bk = w->bv = NULL;
+    }
 
     base = map_qtensor(&w->q_tokens, base, (long)p->vocab_size * D, gs);
     base = map_qtensor(&w->q_wq, base, L * D * D, gs);
@@ -136,23 +145,36 @@ static void init_from_blob(Transformer *t, const uint8_t *base)
     if (magic == MQ_MAGIC) {
         t->quantized = 1;
         const int32_t *h = (const int32_t *)base;
-        /* h[0]=magic, h[1]=version, h[2..8]=Config, h[9]=gs, h[10]=shared */
-        if (h[1] != MQ_VERSION) {
+        /* h[0]=magic, h[1]=version, h[2..8]=Config, h[9]=gs, h[10]=shared,
+         * h[11]=has_qkv_bias, h[12]=rope_theta bits, h[13]=rms_eps bits (v2). */
+        if (h[1] != 1 && h[1] != 2) {
             fprintf(stderr, "mote: unsupported .mq version %d\n", h[1]); exit(1);
         }
         t->config = *(const Config *)(h + 2);
         t->gs = h[9];
         int shared = h[10];
+        t->has_qkv_bias = (h[1] >= 2) ? h[11] : 0;
+        /* rope_theta / eps live in the header as float bits; 0 means "unset",
+         * so a v1 file (or a writer that left them blank) gets Llama defaults. */
+        float rope_theta, rms_eps;
+        memcpy(&rope_theta, &h[12], sizeof(float));
+        memcpy(&rms_eps, &h[13], sizeof(float));
+        t->rope_theta = (rope_theta > 0.0f) ? rope_theta : 10000.0f;
+        t->rms_eps    = (rms_eps > 0.0f)    ? rms_eps    : 1e-5f;
         if (t->gs <= 0 || (t->config.dim % t->gs) || (t->config.hidden_dim % t->gs)) {
             fprintf(stderr, "mote: bad group size %d for this model\n", t->gs); exit(1);
         }
-        map_weights_quant(&t->weights, &t->config, t->gs, shared, (char *)base + MQ_HEADER);
+        map_weights_quant(&t->weights, &t->config, t->gs, shared,
+                          t->has_qkv_bias, (char *)base + MQ_HEADER);
     } else {
         t->quantized = 0;
         t->gs = 0;
         t->config = *(const Config *)base;
         int shared = t->config.vocab_size > 0;
         t->config.vocab_size = abs(t->config.vocab_size);
+        t->has_qkv_bias = 0;
+        t->rope_theta = 10000.0f;
+        t->rms_eps = 1e-5f;
         float *weights_ptr = (float *)base + sizeof(Config) / sizeof(float);
         map_weights_fp32(&t->weights, &t->config, weights_ptr, shared);
     }

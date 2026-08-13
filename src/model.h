@@ -17,7 +17,7 @@
 /* mote quantized format. The magic is the ASCII "mote" read as a little-endian
  * int32, which cannot collide with a legacy header (whose first int is `dim`). */
 #define MQ_MAGIC   0x65746F6D
-#define MQ_VERSION 1
+#define MQ_VERSION 2            /* v2 adds optional QKV bias + rope_theta/eps in the header */
 #define MQ_HEADER  256          /* header padded to this, keeps weights aligned */
 
 /* Weight tensors. In the fp32 path the `float *` fields are live and the
@@ -28,6 +28,11 @@ typedef struct {
     float *rms_att;           /* (layer, dim)  pre-attention norm gain  */
     float *rms_ffn;           /* (layer, dim)  pre-ffn norm gain        */
     float *rms_final;         /* (dim)         final norm gain          */
+
+    /* optional fp32 attention biases (Qwen-style q/k/v have them; Llama does not).
+     * NULL when the checkpoint carries no bias. bq is (layer, dim); bk and bv are
+     * (layer, kv_dim). Applied right after the q/k/v projections, before RoPE. */
+    float *bq, *bk, *bv;
 
     /* fp32 path */
     float *token_embedding;   /* (vocab, dim)                           */
@@ -63,6 +68,11 @@ typedef struct {
     RunState state;
     int    quantized;  /* 0 = fp32 path, 1 = quantized path        */
     int    gs;         /* quantization group size (quantized only) */
+    /* architecture knobs that used to be constants. Defaulted for legacy
+     * checkpoints (Llama/TinyStories), read from the header for .mq v2. */
+    float  rope_theta; /* RoPE base frequency (Llama 10000, Qwen 1000000) */
+    float  rms_eps;    /* RMSNorm epsilon (Llama 1e-5, Qwen 1e-6)         */
+    int    has_qkv_bias; /* 1 if bq/bk/bv are present                     */
     int    fd;         /* file descriptor of the mmap'd checkpoint */
     void  *data;       /* mmap base                                */
     ssize_t file_size;

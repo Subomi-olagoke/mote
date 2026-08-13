@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -119,6 +120,12 @@ int main(int argc, char **argv)
     header[8] = c.seq_len;
     header[9] = gs;
     header[10] = shared;
+    /* v2 fields: this legacy path carries no attention bias and uses the Llama
+     * RoPE base and epsilon. Stored as float bits so the runtime reads them back. */
+    header[11] = 0;                 /* has_qkv_bias */
+    float rope_theta = 10000.0f, rms_eps = 1e-5f;
+    memcpy(&header[12], &rope_theta, sizeof(float));
+    memcpy(&header[13], &rms_eps, sizeof(float));
     fwrite(header, 1, MQ_HEADER, out);
 
     /* norms, fp32 */

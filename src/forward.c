@@ -20,12 +20,12 @@
 #include <arm_neon.h>
 #endif
 
-static void rmsnorm(float *out, const float *x, const float *weight, int size)
+static void rmsnorm(float *out, const float *x, const float *weight, int size, float eps)
 {
     float ss = 0.0f;
     for (int i = 0; i < size; i++)
         ss += x[i] * x[i];
-    ss = 1.0f / sqrtf(ss / size + 1e-5f);
+    ss = 1.0f / sqrtf(ss / size + eps);
     for (int i = 0; i < size; i++)
         out[i] = weight[i] * (ss * x[i]);
 }
@@ -120,7 +120,7 @@ float *forward(Transformer *t, int token, int pos)
 
     for (int l = 0; l < p->n_layers; l++) {
         /* ---- attention ---- */
-        rmsnorm(s->xb, x, w->rms_att + (long)l * dim, dim);
+        rmsnorm(s->xb, x, w->rms_att + (long)l * dim, dim, t->rms_eps);
 
         long loff = (long)l * p->seq_len * kv_dim;
         float *k = s->key_cache + loff + (long)pos * kv_dim;
@@ -130,10 +130,20 @@ float *forward(Transformer *t, int token, int pos)
         mm(t, k,    s->xb, dim, kv_dim,  w->wk, &w->q_wk, (long)l * dim * kv_dim);
         mm(t, v,    s->xb, dim, kv_dim,  w->wv, &w->q_wv, (long)l * dim * kv_dim);
 
+        /* Qwen-style attention bias, added to the projections before RoPE. The
+         * converter permutes bq/bk to match mote's interleaved rotary layout. */
+        if (t->has_qkv_bias) {
+            const float *bq = w->bq + (long)l * dim;
+            const float *bk = w->bk + (long)l * kv_dim;
+            const float *bv = w->bv + (long)l * kv_dim;
+            for (int i = 0; i < dim; i++)    s->q[i] += bq[i];
+            for (int i = 0; i < kv_dim; i++) { k[i] += bk[i]; v[i] += bv[i]; }
+        }
+
         /* rotary position embedding on q and (within kv range) k */
         for (int i = 0; i < dim; i += 2) {
             int head_dim = i % head_size;
-            float freq = 1.0f / powf(10000.0f, head_dim / (float)head_size);
+            float freq = 1.0f / powf(t->rope_theta, head_dim / (float)head_size);
             float val = pos * freq;
             float fcr = cosf(val), fci = sinf(val);
             int rotn = i < kv_dim ? 2 : 1;
@@ -175,7 +185,7 @@ float *forward(Transformer *t, int token, int pos)
             x[i] += s->xb2[i];
 
         /* ---- feed-forward: SwiGLU, w2( silu(w1 x) * (w3 x) ) ---- */
-        rmsnorm(s->xb, x, w->rms_ffn + (long)l * dim, dim);
+        rmsnorm(s->xb, x, w->rms_ffn + (long)l * dim, dim, t->rms_eps);
         mm(t, s->hb,  s->xb, dim, hidden_dim, w->w1, &w->q_w1, (long)l * dim * hidden_dim);
         mm(t, s->hb2, s->xb, dim, hidden_dim, w->w3, &w->q_w3, (long)l * dim * hidden_dim);
         for (int i = 0; i < hidden_dim; i++) {
@@ -189,7 +199,7 @@ float *forward(Transformer *t, int token, int pos)
             x[i] += s->xb[i];
     }
 
-    rmsnorm(x, x, w->rms_final, dim);
+    rmsnorm(x, x, w->rms_final, dim, t->rms_eps);
     mm(t, s->logits, x, dim, p->vocab_size, w->wcls, &w->q_wcls, 0);
     return s->logits;
 }

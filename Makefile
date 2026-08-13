@@ -3,8 +3,12 @@
 #   make          optimized single-thread build   -> ./mote
 #   make omp      multi-threaded (needs OpenMP)    -> ./mote
 #   make quantize the fp32 -> int8 converter       -> ./quantize
+#   make run_ids  drive the engine on token IDs    -> ./run_ids
 #   make debug    warnings + sanitizers            -> ./mote
 #   make clean
+#
+# To import a HuggingFace Qwen2 checkpoint: tools/convert_hf.py writes a .mq the
+# engine loads directly (see the tool's header for what it reconciles).
 
 CC      ?= cc
 CFLAGS  ?= -O3 -std=c11 -Wall -Wextra
@@ -15,13 +19,18 @@ BIN     := mote
 $(BIN): $(SRC)
 	$(CC) $(CFLAGS) -o $@ $(SRC) $(LDLIBS)
 
-.PHONY: omp quantize debug clean
+.PHONY: omp quantize run_ids debug clean
 omp: $(SRC)
 	$(CC) $(CFLAGS) -fopenmp -o $(BIN) $(SRC) $(LDLIBS)
 
 # the converter reuses the engine's quantization core
 quantize: tools/quantize.c src/quant.c src/parallel.c
 	$(CC) $(CFLAGS) -o $@ tools/quantize.c src/quant.c src/parallel.c $(LDLIBS)
+
+# run the engine on raw token IDs, no tokenizer — validates a freshly converted
+# architecture against its reference model before its tokenizer is ported to C
+run_ids: tools/run_ids.c src/model.c src/forward.c src/quant.c src/parallel.c
+	$(CC) $(CFLAGS) -Isrc -o $@ tools/run_ids.c src/model.c src/forward.c src/quant.c src/parallel.c $(LDLIBS)
 
 # emit a model as a const C array to link into firmware (weights in flash)
 blob2c: tools/blob2c.c
@@ -37,4 +46,4 @@ debug: $(SRC)
 	      -o $(BIN) $(SRC) $(LDLIBS)
 
 clean:
-	rm -f $(BIN) quantize blob2c perplexity
+	rm -f $(BIN) quantize blob2c perplexity run_ids
