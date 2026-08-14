@@ -14,10 +14,13 @@ reconciles:
      q/k weights AND their biases are permuted back to interleaved here. Miss this
      and the model emits fluent-looking nonsense.
 
-The big matrices are quantized to symmetric int8 with one fp32 scale per group,
-exactly what mote's runtime dequantizes. Norm gains and biases stay fp32.
+The big matrices are quantized to symmetric int8 (default) or packed int4
+(--bits 4) with one fp32 scale per group, exactly what mote's runtime
+dequantizes. int4 uses a per-group clipped-scale search: shrinking the scale
+clips the group's outlier but gives every other weight finer steps, and the
+scale with the least round-trip error wins. Norm gains and biases stay fp32.
 
-  python3 tools/convert_hf.py <hf_model_dir> <out.mq> [--gs 64] [--seqlen 2048]
+  python3 tools/convert_hf.py <hf_model_dir> <out.mq> [--gs 64] [--bits 8] [--seqlen 2048]
 """
 import argparse
 import glob
@@ -69,11 +72,52 @@ def quantize_flat(w, gs):
     return q.tobytes(), scale.astype(np.float32).tobytes()
 
 
+def quantize_flat_q4(w, gs):
+    """int4 in [-8, 7], two per byte, exactly mote's quantize_q4: the scale is
+    the group's largest-magnitude weight over -8 (keeping its sign, so that
+    weight lands exactly on -8 and the rest get finer steps), plus a small
+    shrunken-scale search kept only when it lowers round-trip error. Packing
+    matches the runtime: within a group, byte k holds w[k] (low nibble) and
+    w[k + gs/2] (high nibble). Returns (packed bytes, fp32 scales). Chunked so
+    the embedding matrix does not need candidate-count copies of itself."""
+    assert gs % 2 == 0
+    flat = np.ascontiguousarray(w, dtype=np.float32).ravel()
+    assert flat.size % gs == 0, f"group size {gs} does not divide {flat.size}"
+    g = flat.reshape(-1, gs)
+    half = gs // 2
+
+    packed = np.empty((len(g), half), dtype=np.uint8)
+    scales = np.empty(len(g), dtype=np.float32)
+    chunk = 1 << 20                          # groups per pass
+    for lo in range(0, len(g), chunk):
+        gc = g[lo:lo + chunk]
+        m = np.take_along_axis(gc, np.abs(gc).argmax(axis=1)[:, None], axis=1)[:, 0]
+        best_err = np.full(len(gc), np.inf, dtype=np.float32)
+        best_scale = np.zeros(len(gc), dtype=np.float32)
+        best_q = np.zeros(gc.shape, dtype=np.int8)
+        for c in range(5):
+            scale = (m / -8.0) * (1.0 - 0.05 * c)
+            safe = np.where(scale != 0.0, scale, 1.0)
+            q = np.clip(np.rint(gc / safe[:, None]), -8, 7).astype(np.int8)
+            err = ((gc - q * scale[:, None]) ** 2).sum(axis=1)
+            better = err < best_err
+            best_err[better] = err[better]
+            best_scale[better] = scale[better]
+            best_q[better] = q[better]
+        scales[lo:lo + chunk] = best_scale
+        qlo = best_q[:, :half].astype(np.int16)
+        qhi = best_q[:, half:].astype(np.int16)
+        packed[lo:lo + chunk] = ((qlo & 0xF) | ((qhi & 0xF) << 4)).astype(np.uint8)
+    return packed.tobytes(), scales.tobytes()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("model_dir")
     ap.add_argument("out")
     ap.add_argument("--gs", type=int, default=64)
+    ap.add_argument("--bits", type=int, default=8, choices=(8, 4),
+                    help="weight width; 4 halves the file again at some quality cost")
     ap.add_argument("--seqlen", type=int, default=2048,
                     help="cap the context (bounds the KV cache); RoPE is unaffected")
     args = ap.parse_args()
@@ -109,19 +153,22 @@ def main():
     bv = np.stack([g(f"model.layers.{l}.self_attn.v_proj.bias") for l in range(L)])
 
     print(f"config: dim={D} hidden={HD} layers={L} heads={NH}/{NKV} vocab={V} "
-          f"seq={seq_len} theta={rope_theta:g} eps={rms_eps:g} shared={shared} gs={gs}", flush=True)
+          f"seq={seq_len} theta={rope_theta:g} eps={rms_eps:g} shared={shared} "
+          f"gs={gs} bits={args.bits}", flush=True)
 
     with open(args.out, "wb") as f:
-        # header: 64 int32 slots (256 bytes)
+        # header: 64 int32 slots (256 bytes). Stamp the lowest version that can
+        # express the file, so int8 output still loads on a v2 runtime.
         h = [0] * (MQ_HEADER // 4)
-        h[0] = MQ_MAGIC; h[1] = MQ_VERSION
+        h[0] = MQ_MAGIC; h[1] = 3 if args.bits == 4 else 2
         h[2] = D; h[3] = HD; h[4] = L; h[5] = NH; h[6] = NKV; h[7] = V; h[8] = seq_len
         h[9] = gs; h[10] = 1 if shared else 0
         h[11] = 1  # has_qkv_bias
-        f.write(struct.pack("<14i", *h[:14]))
+        f.write(struct.pack("<12i", *h[:12]))
         f.write(struct.pack("<f", rope_theta))   # slot 12 as float
         f.write(struct.pack("<f", rms_eps))      # slot 13 as float
-        f.write(b"\x00" * (MQ_HEADER - 14 * 4 - 8))
+        f.write(struct.pack("<i", args.bits))    # slot 14
+        f.write(b"\x00" * (MQ_HEADER - 15 * 4))
 
         # fp32 norms, then fp32 biases
         for a in (rms_att, rms_ffn, rms_final, bq, bk, bv):
@@ -129,7 +176,10 @@ def main():
 
         # quantized tensors, in the order the loader maps them
         def wq(mat):
-            qb, sb = quantize_flat(mat, gs)
+            if args.bits == 4:
+                qb, sb = quantize_flat_q4(mat, gs)
+            else:
+                qb, sb = quantize_flat(mat, gs)
             f.write(qb); f.write(sb)
 
         wq(g("model.embed_tokens.weight"))                                    # tokens
