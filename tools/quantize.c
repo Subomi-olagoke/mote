@@ -1,12 +1,13 @@
 /* tools/quantize.c — turn a legacy fp32 checkpoint into mote's .mq format.
  *
- *   quantize <in.bin> <out.mq> [group_size]
+ *   quantize <in.bin> <out.mq> [group_size] [bits]
  *
- * Reads the fp32 weights, quantizes the big matrices to symmetric int8 with one
- * fp32 scale per group, and writes them back in mote's self-describing layout.
- * The norm gains stay fp32. Group size defaults to the largest of 64/32/16/8
- * that divides both dim and hidden_dim, and is recorded in the header so the
- * runtime reads it back.
+ * Reads the fp32 weights, quantizes the big matrices to symmetric int8 (the
+ * default) or packed int4 (`bits` = 4) with one fp32 scale per group, and
+ * writes them back in mote's self-describing layout. The norm gains stay fp32.
+ * Group size defaults to the largest of 64/32/16/8 that divides both dim and
+ * hidden_dim, and is recorded in the header so the runtime reads it back.
+ * int8 files are stamped v2 (older runtimes still load them); int4 needs v3.
  */
 #include <fcntl.h>
 #include <math.h>
@@ -32,24 +33,35 @@ static int pick_group_size(const Config *c)
     return 0;
 }
 
-/* quantize a flat fp32 tensor and append it: int8 block, then fp32 scales */
-static double write_qtensor(FILE *out, const float *w, long size, int gs)
+/* quantize a flat fp32 tensor and append it: packed weights, then fp32 scales */
+static double write_qtensor(FILE *out, const float *w, long size, int gs, int bits)
 {
-    int8_t *q = malloc(size * sizeof(int8_t));
+    long qbytes = bits == 4 ? size / 2 : size;
+    int8_t *q = malloc(qbytes);
     float *s = malloc((size / gs) * sizeof(float));
     if (!q || !s) { fprintf(stderr, "quantize: out of memory\n"); exit(1); }
 
     QTensor qt = { .q = q, .s = s };
-    quantize(&qt, w, (int)size, gs);
+    if (bits == 4)
+        quantize_q4(&qt, w, size, gs);
+    else
+        quantize(&qt, w, (int)size, gs);
 
     /* round-trip error, for the report */
+    float *back = malloc(size * sizeof(float));
+    if (!back) { fprintf(stderr, "quantize: out of memory\n"); exit(1); }
+    if (bits == 4)
+        dequantize_q4(&qt, back, (int)size, gs);
+    else
+        dequantize(&qt, back, (int)size, gs);
     double err = 0.0;
     for (long i = 0; i < size; i++) {
-        double d = (double)w[i] - (double)(q[i] * s[i / gs]);
+        double d = (double)w[i] - (double)back[i];
         err += d * d;
     }
+    free(back);
 
-    fwrite(q, sizeof(int8_t), size, out);
+    fwrite(q, 1, qbytes, out);
     fwrite(s, sizeof(float), size / gs, out);
     free(q);
     free(s);
@@ -59,11 +71,16 @@ static double write_qtensor(FILE *out, const float *w, long size, int gs)
 int main(int argc, char **argv)
 {
     if (argc < 3) {
-        fprintf(stderr, "usage: %s <in.bin> <out.mq> [group_size]\n", argv[0]);
+        fprintf(stderr, "usage: %s <in.bin> <out.mq> [group_size] [bits]\n", argv[0]);
         return 1;
     }
     const char *in_path = argv[1];
     const char *out_path = argv[2];
+    int bits = (argc >= 5) ? atoi(argv[4]) : 8;
+    if (bits != 8 && bits != 4) {
+        fprintf(stderr, "quantize: bits must be 8 or 4\n");
+        return 1;
+    }
 
     /* map the fp32 checkpoint */
     int fd = open(in_path, O_RDONLY);
@@ -77,7 +94,7 @@ int main(int argc, char **argv)
     c.vocab_size = abs(c.vocab_size);
 
     int gs = (argc >= 4) ? atoi(argv[3]) : pick_group_size(&c);
-    if (gs <= 0 || c.dim % gs || c.hidden_dim % gs) {
+    if (gs <= 0 || c.dim % gs || c.hidden_dim % gs || (bits == 4 && gs % 2)) {
         fprintf(stderr, "quantize: no group size divides dim=%d and hidden=%d\n",
                 c.dim, c.hidden_dim);
         return 1;
@@ -110,7 +127,7 @@ int main(int argc, char **argv)
     /* header: 256 bytes, ints then zero padding */
     int32_t header[MQ_HEADER / 4] = { 0 };
     header[0] = MQ_MAGIC;
-    header[1] = MQ_VERSION;
+    header[1] = bits == 4 ? 3 : 2;   /* lowest version that can express the file */
     header[2] = c.dim;
     header[3] = c.hidden_dim;
     header[4] = c.n_layers;
@@ -126,6 +143,7 @@ int main(int argc, char **argv)
     float rope_theta = 10000.0f, rms_eps = 1e-5f;
     memcpy(&header[12], &rope_theta, sizeof(float));
     memcpy(&header[13], &rms_eps, sizeof(float));
+    header[14] = bits;
     fwrite(header, 1, MQ_HEADER, out);
 
     /* norms, fp32 */
@@ -136,15 +154,15 @@ int main(int argc, char **argv)
     /* quantized tensors */
     double err = 0.0;
     long nq = 0;
-    err += write_qtensor(out, tok, (long)c.vocab_size * D, gs); nq += (long)c.vocab_size * D;
-    err += write_qtensor(out, wq, L * D * D, gs);   nq += L * D * D;
-    err += write_qtensor(out, wk, L * D * kv, gs);  nq += L * D * kv;
-    err += write_qtensor(out, wv, L * D * kv, gs);  nq += L * D * kv;
-    err += write_qtensor(out, wo, L * D * D, gs);   nq += L * D * D;
-    err += write_qtensor(out, w1, L * D * HD, gs);  nq += L * D * HD;
-    err += write_qtensor(out, w2, L * HD * D, gs);  nq += L * HD * D;
-    err += write_qtensor(out, w3, L * D * HD, gs);  nq += L * D * HD;
-    if (!shared) { err += write_qtensor(out, wcls, (long)c.vocab_size * D, gs); nq += (long)c.vocab_size * D; }
+    err += write_qtensor(out, tok, (long)c.vocab_size * D, gs, bits); nq += (long)c.vocab_size * D;
+    err += write_qtensor(out, wq, L * D * D, gs, bits);   nq += L * D * D;
+    err += write_qtensor(out, wk, L * D * kv, gs, bits);  nq += L * D * kv;
+    err += write_qtensor(out, wv, L * D * kv, gs, bits);  nq += L * D * kv;
+    err += write_qtensor(out, wo, L * D * D, gs, bits);   nq += L * D * D;
+    err += write_qtensor(out, w1, L * D * HD, gs, bits);  nq += L * D * HD;
+    err += write_qtensor(out, w2, L * HD * D, gs, bits);  nq += L * HD * D;
+    err += write_qtensor(out, w3, L * D * HD, gs, bits);  nq += L * D * HD;
+    if (!shared) { err += write_qtensor(out, wcls, (long)c.vocab_size * D, gs, bits); nq += (long)c.vocab_size * D; }
 
     long out_size = ftell(out);
     fclose(out);
@@ -153,10 +171,10 @@ int main(int argc, char **argv)
 
     fprintf(stderr,
             "quantized %s -> %s\n"
-            "  group size:  %d\n"
+            "  weights:     int%d, group size %d\n"
             "  size:        %.1f MB -> %.1f MB  (%.2fx smaller)\n"
             "  rms error:   %.6f  (per weight, averaged)\n",
-            in_path, out_path, gs,
+            in_path, out_path, bits, gs,
             fsize / 1e6, out_size / 1e6, (double)fsize / out_size,
             nq ? sqrt(err / nq) : 0.0);
     return 0;

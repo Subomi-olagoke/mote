@@ -2,7 +2,7 @@
 #
 #   make          optimized single-thread build   -> ./mote
 #   make omp      multi-threaded (needs OpenMP)    -> ./mote
-#   make quantize the fp32 -> int8 converter       -> ./quantize
+#   make quantize the fp32 -> int8/int4 converter  -> ./quantize
 #   make run_ids  drive the engine on token IDs    -> ./run_ids
 #   make debug    warnings + sanitizers            -> ./mote
 #   make clean

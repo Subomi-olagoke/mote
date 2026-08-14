@@ -28,7 +28,8 @@ typedef struct {
 /* A model's shape, for showing what is actually running. */
 typedef struct {
     int dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, seq_len;
-    int quantized;              /* 1 if the loaded model is int8       */
+    int quantized;              /* 1 if the model is weight-quantized  */
+    int qbits;                  /* weight width when quantized: 8 or 4 */
 } mote_info_t;
 
 void mote_get_info(const mote *m, mote_info_t *out);

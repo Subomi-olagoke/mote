@@ -14,7 +14,7 @@ coherent text from a pretrained model.
 - [x] Sampling: greedy, temperature, top-p
 - [x] CLI with reproducible seeds and tokens/sec reporting
 
-## 2. Quantize — done (int8)
+## 2. Quantize — done (int8 and int4)
 
 Get the model small enough to be interesting on constrained hardware, with the
 quantized arithmetic written by hand rather than pulled from a library.
@@ -24,7 +24,11 @@ quantized arithmetic written by hand rather than pulled from a library.
 - [x] A converter (`tools/quantize.c`) that writes mote's own `.mq` format
 - [x] One binary auto-detects fp32 vs `.mq` and runs either
 - [x] Measured: 3.6x smaller on the 15M model, ~0.0003 RMS/weight, quality held
-- [ ] Explore sub-8-bit (int4) for the weight-heavy layers
+- [x] int4: two weights per byte, signed-scale Q4_0-style rounding, its own
+      nibble-unpacking matmul. 6.4x smaller than fp32; perplexity 2.640 vs
+      2.376 fp32 on held-out TinyStories (int8: 2.379). Scheme chosen by
+      measurement — see the README's quantization section.
+- [ ] Quantize the KV cache (activation memory, matters on small devices)
 
 ## 3. Onto a microcontroller — the point
 

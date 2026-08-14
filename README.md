@@ -31,12 +31,14 @@ make                              # builds ./mote, needs only a C compiler
 ./mote models/stories15M.bin -i "Once upon a time"
 ```
 
-Or run it quantized, about 4x smaller and noticeably faster:
+Or run it quantized, 4x smaller (int8) or 6x smaller (int4) and noticeably faster:
 
 ```bash
 make quantize                                        # builds the converter
 ./quantize models/stories15M.bin models/stories15M.mq
 ./mote models/stories15M.mq -i "Once upon a time"    # int8, same output quality
+./quantize models/stories15M.bin models/stories15M_q4.mq 32 4
+./mote models/stories15M_q4.mq -i "Once upon a time" # int4, still coherent
 ```
 
 Options:
@@ -63,7 +65,7 @@ The engine is small enough to hold in your head:
 | `src/forward.c` | one token through the network, the core of the whole thing |
 | `src/tokenizer.c` | byte-pair encode/decode between text and token ids |
 | `src/sampler.c` | greedy, temperature, and top-p sampling |
-| `src/quant.c` | int8 quantization: the pack, dequant, and the int8 matmul |
+| `src/quant.c` | int8 and int4 quantization: the pack, dequant, and integer matmuls |
 | `src/mote.c` | the CLI and the generation loop |
 | `tools/quantize.c` | converts an fp32 checkpoint to the quantized `.mq` format |
 
@@ -83,18 +85,36 @@ make omp      # OpenMP build, if your compiler has it
 
 ## Quantization
 
-`mote` also runs int8. The converter packs each big weight matrix into 8-bit
-integers with one fp32 scale per group of values (symmetric "Q8_0" quantization),
-and the runtime does the matmul in int8, quantizing each activation on the fly
-and folding the scales back in per group. The norm gains stay fp32.
+`mote` also runs quantized weights, at two widths. int8 packs each big weight
+matrix into 8-bit integers with one fp32 scale per group of values (symmetric
+"Q8_0" quantization). int4 goes further: two weights per byte in [-8, 7], where
+the scale carries the sign of the group's largest weight so that weight lands
+exactly on -8 and every other weight gets a finer step (the "Q4_0" idea). In
+both, the runtime quantizes each activation to int8 on the fly and the matmul
+is integer work with the scales folded back in per group. The norm gains stay
+fp32.
 
-One binary runs both: a checkpoint's first bytes say whether it is fp32 or `.mq`,
-and the engine picks the path. On the 15M model, int8 is about **3.6x smaller**
-on disk (61 MB to 17 MB). And the quality is measured, not asserted: `make
-perplexity` scores a model over held-out text, and int8 lands at **2.915**
-perplexity against fp32's **2.912**, a 0.1% cost for a quarter of the size.
-Because the weights are a quarter of the size, it is also markedly faster to
-run, memory bandwidth is the bottleneck, not arithmetic.
+One binary runs all of it: a checkpoint's first bytes say whether it is fp32 or
+`.mq`, and the header says how wide the weights are. And the quality is
+measured, not asserted: `make perplexity` scores a model over held-out text
+(TinyStories validation data, ~17k tokens). On the 15M model:
+
+| weights | size | perplexity | cost |
+|---|---|---|---|
+| fp32 | 61 MB | 2.376 | — |
+| int8 (gs 32) | 17 MB | 2.379 | +0.1% |
+| int4 (gs 32) | 9.5 MB | 2.640 | +11% |
+
+Getting the int4 number down was an exercise in measuring rather than trusting
+intuition: a per-group clipped-scale search *lowers weight-space RMS error* and
+*worsens* perplexity, because the weights it clips are precisely the ones that
+matter. The signed-scale trick above beat every clipping scheme tried; the
+small scale search kept in the converter is worth ~0.1% on top. Weight RMS
+error and model quality are different objectives, only one of them is the point.
+
+Because quantized weights are a quarter (or an eighth) of the size, quantized
+models are also markedly faster to run, memory bandwidth is the bottleneck, not
+arithmetic.
 
 ## Roadmap
 
@@ -102,8 +122,8 @@ run, memory bandwidth is the bottleneck, not arithmetic.
 [ROADMAP.md](ROADMAP.md).
 
 1. **Inference in pure C** — done. This is what you are running now.
-2. **Quantize** the weights to 8-bit, with the math by hand — done, about 4x
-   smaller. int4 for the weight-heavy layers is still open.
+2. **Quantize** the weights, with the math by hand — done at both widths: int8
+   (4x smaller, quality intact) and int4 (6x smaller, quality measured above).
 3. **Onto a microcontroller** — run it on a chip, not a computer.
 
 ## Acknowledgements

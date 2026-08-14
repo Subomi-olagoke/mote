@@ -15,9 +15,12 @@
 #include "quant.h"
 
 /* mote quantized format. The magic is the ASCII "mote" read as a little-endian
- * int32, which cannot collide with a legacy header (whose first int is `dim`). */
+ * int32, which cannot collide with a legacy header (whose first int is `dim`).
+ * v2 added optional QKV bias + rope_theta/eps in the header; v3 adds int4
+ * weights (header slot 14 = bits). Writers stamp the lowest version that can
+ * express the file, so int8 checkpoints stay readable by older runtimes. */
 #define MQ_MAGIC   0x65746F6D
-#define MQ_VERSION 2            /* v2 adds optional QKV bias + rope_theta/eps in the header */
+#define MQ_VERSION 3
 #define MQ_HEADER  256          /* header padded to this, keeps weights aligned */
 
 /* Weight tensors. In the fp32 path the `float *` fields are live and the
@@ -68,6 +71,7 @@ typedef struct {
     RunState state;
     int    quantized;  /* 0 = fp32 path, 1 = quantized path        */
     int    gs;         /* quantization group size (quantized only) */
+    int    qbits;      /* weight width, 8 or 4 (quantized only)    */
     /* architecture knobs that used to be constants. Defaulted for legacy
      * checkpoints (Llama/TinyStories), read from the header for .mq v2. */
     float  rope_theta; /* RoPE base frequency (Llama 10000, Qwen 1000000) */

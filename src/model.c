@@ -38,17 +38,17 @@ static void map_weights_fp32(Weights *w, const Config *p, float *ptr, int shared
 }
 
 /* ---- quantized layout ---- */
-static char *map_qtensor(QTensor *qt, char *p, long size, int gs)
+static char *map_qtensor(QTensor *qt, char *p, long size, int gs, int bits)
 {
     qt->q = (int8_t *)p;
-    p += size * (long)sizeof(int8_t);
+    p += bits == 4 ? size / 2 : size;   /* int4 packs two weights per byte */
     qt->s = (float *)p;
     p += (size / gs) * (long)sizeof(float);
     return p;
 }
 
-static void map_weights_quant(Weights *w, const Config *p, int gs, int shared,
-                              int has_qkv_bias, char *base)
+static void map_weights_quant(Weights *w, const Config *p, int gs, int bits,
+                              int shared, int has_qkv_bias, char *base)
 {
     long L = p->n_layers, D = p->dim, HD = p->hidden_dim;
     int head_size = p->dim / p->n_heads;
@@ -68,18 +68,18 @@ static void map_weights_quant(Weights *w, const Config *p, int gs, int shared,
         w->bq = w->bk = w->bv = NULL;
     }
 
-    base = map_qtensor(&w->q_tokens, base, (long)p->vocab_size * D, gs);
-    base = map_qtensor(&w->q_wq, base, L * D * D, gs);
-    base = map_qtensor(&w->q_wk, base, L * D * kv, gs);
-    base = map_qtensor(&w->q_wv, base, L * D * kv, gs);
-    base = map_qtensor(&w->q_wo, base, L * D * D, gs);
-    base = map_qtensor(&w->q_w1, base, L * D * HD, gs);
-    base = map_qtensor(&w->q_w2, base, L * HD * D, gs);
-    base = map_qtensor(&w->q_w3, base, L * D * HD, gs);
+    base = map_qtensor(&w->q_tokens, base, (long)p->vocab_size * D, gs, bits);
+    base = map_qtensor(&w->q_wq, base, L * D * D, gs, bits);
+    base = map_qtensor(&w->q_wk, base, L * D * kv, gs, bits);
+    base = map_qtensor(&w->q_wv, base, L * D * kv, gs, bits);
+    base = map_qtensor(&w->q_wo, base, L * D * D, gs, bits);
+    base = map_qtensor(&w->q_w1, base, L * D * HD, gs, bits);
+    base = map_qtensor(&w->q_w2, base, L * HD * D, gs, bits);
+    base = map_qtensor(&w->q_w3, base, L * D * HD, gs, bits);
     if (shared)
         w->q_wcls = w->q_tokens;
     else
-        map_qtensor(&w->q_wcls, base, (long)p->vocab_size * D, gs);
+        map_qtensor(&w->q_wcls, base, (long)p->vocab_size * D, gs, bits);
 }
 
 static void alloc_state(RunState *s, const Config *p, int quantized, int gs)
@@ -146,14 +146,19 @@ static void init_from_blob(Transformer *t, const uint8_t *base)
         t->quantized = 1;
         const int32_t *h = (const int32_t *)base;
         /* h[0]=magic, h[1]=version, h[2..8]=Config, h[9]=gs, h[10]=shared,
-         * h[11]=has_qkv_bias, h[12]=rope_theta bits, h[13]=rms_eps bits (v2). */
-        if (h[1] != 1 && h[1] != 2) {
+         * h[11]=has_qkv_bias, h[12]=rope_theta bits, h[13]=rms_eps bits (v2),
+         * h[14]=weight bits (v3; 0 means int8). */
+        if (h[1] < 1 || h[1] > MQ_VERSION) {
             fprintf(stderr, "mote: unsupported .mq version %d\n", h[1]); exit(1);
         }
         t->config = *(const Config *)(h + 2);
         t->gs = h[9];
         int shared = h[10];
         t->has_qkv_bias = (h[1] >= 2) ? h[11] : 0;
+        t->qbits = (h[1] >= 3 && h[14]) ? h[14] : 8;
+        if (t->qbits != 8 && t->qbits != 4) {
+            fprintf(stderr, "mote: unsupported weight width %d bits\n", t->qbits); exit(1);
+        }
         /* rope_theta / eps live in the header as float bits; 0 means "unset",
          * so a v1 file (or a writer that left them blank) gets Llama defaults. */
         float rope_theta, rms_eps;
@@ -161,14 +166,16 @@ static void init_from_blob(Transformer *t, const uint8_t *base)
         memcpy(&rms_eps, &h[13], sizeof(float));
         t->rope_theta = (rope_theta > 0.0f) ? rope_theta : 10000.0f;
         t->rms_eps    = (rms_eps > 0.0f)    ? rms_eps    : 1e-5f;
-        if (t->gs <= 0 || (t->config.dim % t->gs) || (t->config.hidden_dim % t->gs)) {
+        if (t->gs <= 0 || (t->config.dim % t->gs) || (t->config.hidden_dim % t->gs)
+            || (t->qbits == 4 && t->gs % 2)) {
             fprintf(stderr, "mote: bad group size %d for this model\n", t->gs); exit(1);
         }
-        map_weights_quant(&t->weights, &t->config, t->gs, shared,
+        map_weights_quant(&t->weights, &t->config, t->gs, t->qbits, shared,
                           t->has_qkv_bias, (char *)base + MQ_HEADER);
     } else {
         t->quantized = 0;
         t->gs = 0;
+        t->qbits = 0;
         t->config = *(const Config *)base;
         int shared = t->config.vocab_size > 0;
         t->config.vocab_size = abs(t->config.vocab_size);

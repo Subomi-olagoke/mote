@@ -95,6 +95,7 @@ void mote_get_info(const mote *m, mote_info_t *out)
     out->vocab_size = c->vocab_size;
     out->seq_len = c->seq_len;
     out->quantized = m->t.quantized;
+    out->qbits = m->t.qbits;
 }
 
 int mote_generate(mote *m, const char *prompt, const mote_params *p,

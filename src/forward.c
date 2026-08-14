@@ -7,8 +7,8 @@
  *
  * Norms, attention, and the activations stay fp32 in both paths. Only the eight
  * big matmuls change: quantized checkpoints quantize the activation on the fly
- * and run int8 x int8, which is where all the size and, on a chip, all the speed
- * will come from.
+ * and run integer arithmetic (int8 x int8, or int8 x int4 for the packed
+ * format), which is where all the size and, on a chip, all the speed come from.
  */
 #include "model.h"
 #include "parallel.h"
@@ -90,7 +90,10 @@ static void mm(Transformer *t, float *out, float *in, int n, int d,
 {
     if (t->quantized) {
         quantize(&t->state.xq, in, n, t->gs);
-        matmul_q8(out, &t->state.xq, wq, off, n, d, t->gs);
+        if (t->qbits == 4)
+            matmul_q4(out, &t->state.xq, wq, off, n, d, t->gs);
+        else
+            matmul_q8(out, &t->state.xq, wq, off, n, d, t->gs);
     } else {
         matmul_f32(out, in, wf + off, n, d);
     }
@@ -111,9 +114,13 @@ float *forward(Transformer *t, int token, int pos)
 
     /* seed the residual stream with this token's embedding */
     if (t->quantized) {
-        QTensor row = { .q = w->q_tokens.q + (long)token * dim,
-                        .s = w->q_tokens.s + (long)token * dim / t->gs };
-        dequantize(&row, x, dim, t->gs);
+        long qoff = (long)token * dim;   /* element offset of this token's row */
+        QTensor row = { .q = w->q_tokens.q + (t->qbits == 4 ? qoff / 2 : qoff),
+                        .s = w->q_tokens.s + qoff / t->gs };
+        if (t->qbits == 4)
+            dequantize_q4(&row, x, dim, t->gs);
+        else
+            dequantize(&row, x, dim, t->gs);
     } else {
         memcpy(x, w->token_embedding + (long)token * dim, dim * sizeof(float));
     }
