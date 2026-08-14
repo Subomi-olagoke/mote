@@ -194,7 +194,7 @@ def main():
             wq(g("lm_head.weight"))
 
     mb = os.path.getsize(args.out) / 1e6
-    print(f"wrote {args.out}  ({mb:.1f} MB, int8 gs={gs})", flush=True)
+    print(f"wrote {args.out}  ({mb:.1f} MB, int{args.bits} gs={gs})", flush=True)
 
 
 if __name__ == "__main__":
