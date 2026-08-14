@@ -7,10 +7,17 @@
  * that actually came next. Lower is better. Its whole use here is comparison:
  * run it on the fp32 model and the quantized one and the gap is exactly what
  * quantization cost, no hand-waving.
+ *
+ * Blank lines split the text into documents; each document is encoded and
+ * scored on its own from position 0 (a story corpus is many short documents,
+ * and the tokenizer's merge loop is quadratic, so one giant encode would cost
+ * minutes for no accuracy). A document longer than the context is scored in
+ * back-to-back windows of seq_len tokens, each starting cold.
  */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "../src/model.h"
 #include "../src/tokenizer.h"
@@ -51,33 +58,48 @@ int main(int argc, char **argv)
     char *text = read_file(text_path, &len);
 
     int *tokens = malloc((len + 3) * sizeof(int));
-    int n = 0;
-    encode(&tk, text, /*bos=*/1, /*eos=*/0, tokens, &n);
-    if (n > t.config.seq_len) n = t.config.seq_len;   /* stay within context */
-    if (n < 2) { fprintf(stderr, "need at least 2 tokens\n"); return 1; }
-
     double nll = 0.0;
-    int counted = 0;
-    for (int pos = 0; pos < n - 1; pos++) {
-        float *logits = forward(&t, tokens[pos], pos);
-        int target = tokens[pos + 1];
+    long counted = 0;
+    int T = t.config.seq_len;
 
-        /* log-softmax at the target, computed stably via log-sum-exp */
-        float maxl = logits[0];
-        for (int i = 1; i < t.config.vocab_size; i++)
-            if (logits[i] > maxl) maxl = logits[i];
-        double sum = 0.0;
-        for (int i = 0; i < t.config.vocab_size; i++)
-            sum += exp((double)logits[i] - maxl);
-        double logprob = (double)logits[target] - (maxl + log(sum));
+    char *doc = text;
+    while (doc && *doc) {
+        /* a blank line ends the current document */
+        char *next = strstr(doc, "\n\n");
+        if (next) {
+            *next = '\0';
+            next += 2;
+            while (*next == '\n') next++;
+        }
 
-        nll += -logprob;
-        counted++;
+        int n = 0;
+        encode(&tk, doc, /*bos=*/1, /*eos=*/0, tokens, &n);
+        for (int start = 0; start + 1 < n; start += T) {
+            int wlen = n - start < T ? n - start : T;   /* this window's tokens */
+            for (int pos = 0; pos + 1 < wlen; pos++) {
+                float *logits = forward(&t, tokens[start + pos], pos);
+                int target = tokens[start + pos + 1];
+
+                /* log-softmax at the target, computed stably via log-sum-exp */
+                float maxl = logits[0];
+                for (int i = 1; i < t.config.vocab_size; i++)
+                    if (logits[i] > maxl) maxl = logits[i];
+                double sum = 0.0;
+                for (int i = 0; i < t.config.vocab_size; i++)
+                    sum += exp((double)logits[i] - maxl);
+                double logprob = (double)logits[target] - (maxl + log(sum));
+
+                nll += -logprob;
+                counted++;
+            }
+        }
+        doc = next;
     }
+    if (counted == 0) { fprintf(stderr, "need at least 2 tokens\n"); return 1; }
 
     double avg_nll = nll / counted;
     double ppl = exp(avg_nll);
-    printf("%-28s  tokens %4d   avg nll %.4f   perplexity %.3f\n",
+    printf("%-28s  tokens %6ld   avg nll %.4f   perplexity %.3f\n",
            checkpoint, counted, avg_nll, ppl);
 
     free(text);
