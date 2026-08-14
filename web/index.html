@@ -137,9 +137,11 @@ $('form').addEventListener('submit', (e) => {
   if (text) ask(text);
 });
 
+/* ?model=<name> picks any .mq in models/ (default qwen05b_q4); ?tok= likewise */
+const q = new URLSearchParams(location.search);
 worker.postMessage({ type: 'boot',
-                     model: '../models/qwen05b_q4.mq',
-                     tokenizer: '../models/qwen.mtok' });
+                     model: `../models/${q.get('model') || 'qwen05b_q4'}.mq`,
+                     tokenizer: `../models/${q.get('tok') || 'qwen'}.mtok` });
 </script>
 </body>
 </html>
