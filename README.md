@@ -116,6 +116,22 @@ Because quantized weights are a quarter (or an eighth) of the size, quantized
 models are also markedly faster to run, memory bandwidth is the bottleneck, not
 arithmetic.
 
+## In a browser
+
+The engine also compiles to WebAssembly — same C files, one more host:
+
+```bash
+./web/build.sh                    # needs emscripten; emits web/mote.js + .wasm
+python3 -m http.server 8000       # serve from the repo root
+# open http://localhost:8000/web/  (append ?auto to run a benchmark prompt)
+```
+
+The whole engine is ~72KB of wasm; the model download is the only heavy part.
+Measured with the int4 Qwen2.5-0.5B (309 MB): 13.6 tok/s in desktop Chromium
+and 6.5 tok/s in iPhone Safari, single-threaded scalar — no NEON in wasm, no
+threads yet. Slower than the native app, but it is a real chat running from a
+URL with nothing installed.
+
 ## Roadmap
 
 `mote` is being built in three milestones, from the general to the absurd. See

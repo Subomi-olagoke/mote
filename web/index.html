@@ -1,0 +1,118 @@
+<!doctype html>
+<!-- web/index.html — mote in a browser tab.
+
+     The same engine, compiled to WebAssembly (see build.sh), running in a
+     worker. The page fetches nothing itself; it boots the worker, shows model
+     download progress, then streams a chat turn. Append ?auto to the URL to
+     run a fixed prompt on load (hands-free benchmarking).
+
+     Serve from the repo root so ../models/ resolves:
+       python3 -m http.server 8000       then open  /web/?auto            -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mote</title>
+<style>
+  :root {
+    --bg: #fafafa; --fg: #111; --dim: #888; --line: #e5e5e5; --accent: #0a84ff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111; --fg: #eee; --dim: #777; --line: #2a2a2a; }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 16px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+    max-width: 640px; margin: 0 auto; padding: 24px 16px 96px;
+  }
+  h1 { font-size: 20px; font-weight: 600; }
+  #stats { color: var(--dim); font-size: 13px; margin: 8px 0 4px; min-height: 20px; }
+  #perf  { color: var(--dim); font-size: 13px; margin-bottom: 16px; min-height: 20px; }
+  #progress { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; margin: 12px 0; }
+  #progress > div { height: 100%; width: 0; background: var(--accent); transition: width .15s; }
+  .msg { padding: 12px 0; border-top: 1px solid var(--line); white-space: pre-wrap; }
+  .msg.user { color: var(--dim); }
+  form { position: fixed; bottom: 0; left: 0; right: 0; background: var(--bg);
+         border-top: 1px solid var(--line); padding: 12px 16px;
+         display: flex; gap: 8px; max-width: 640px; margin: 0 auto; }
+  input { flex: 1; font: inherit; color: inherit; background: none;
+          border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  button { font: inherit; border: 0; border-radius: 8px; padding: 10px 16px;
+           background: var(--accent); color: #fff; }
+  button:disabled { opacity: .4; }
+</style>
+</head>
+<body>
+<h1>mote</h1>
+<div id="stats">starting…</div>
+<div id="perf"></div>
+<div id="progress"><div></div></div>
+<div id="chat"></div>
+<form id="form">
+  <input id="input" placeholder="Type a prompt…" autocomplete="off" disabled>
+  <button id="send" disabled>run</button>
+</form>
+<script>
+const $ = id => document.getElementById(id);
+const worker = new Worker('worker.js');
+let current = null;   // the streaming assistant bubble
+
+function bubble(cls, text) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + cls;
+  d.textContent = text;
+  $('chat').appendChild(d);
+  return d;
+}
+
+worker.onmessage = (e) => {
+  const m = e.data;
+  if (m.type === 'progress') {
+    $('stats').textContent = `downloading ${m.label}… ${(m.loaded / 1e6).toFixed(0)} / ${(m.total / 1e6).toFixed(0)} MB`;
+    $('progress').firstElementChild.style.width = (100 * m.loaded / m.total) + '%';
+  } else if (m.type === 'ready') {
+    const i = m.info;
+    const params = i.vocab * i.dim + i.layers * (2 * i.dim * i.dim
+                 + 2 * i.dim * (i.kvHeads * (i.dim / i.heads)) + 3 * i.dim * i.hidden);
+    $('stats').textContent =
+      `${i.quantized ? 'int' + i.qbits : 'fp32'} · ~${(params / 1e6).toFixed(0)}M params · ${i.layers} layers · ctx ${i.ctx} · wasm`;
+    $('progress').remove();
+    $('input').disabled = $('send').disabled = false;
+    $('input').focus();
+    if (new URLSearchParams(location.search).has('auto'))
+      ask('What is the capital of Japan?');
+  } else if (m.type === 'token') {
+    if (current) { current.textContent += m.text; scrollTo(0, document.body.scrollHeight); }
+  } else if (m.type === 'done') {
+    $('perf').textContent =
+      `${m.tokensPerSecond.toFixed(1)} tok/s · ${m.msToFirst.toFixed(0)} ms to first · ${m.tokens} tokens · ${m.seconds.toFixed(1)} s`;
+    $('input').disabled = $('send').disabled = false;
+    $('input').focus();
+    current = null;
+  } else if (m.type === 'error') {
+    $('stats').textContent = 'error: ' + m.message;
+  }
+};
+
+function ask(text) {
+  bubble('user', text);
+  current = bubble('assistant', '');
+  $('perf').textContent = 'running…';
+  $('input').value = '';
+  $('input').disabled = $('send').disabled = true;
+  worker.postMessage({ type: 'generate', text, maxNew: 200 });
+}
+
+$('form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const text = $('input').value.trim();
+  if (text) ask(text);
+});
+
+worker.postMessage({ type: 'boot',
+                     model: '../models/qwen05b_q4.mq',
+                     tokenizer: '../models/qwen.mtok' });
+</script>
+</body>
+</html>

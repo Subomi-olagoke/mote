@@ -23,3 +23,7 @@ run_ids
 tok_test
 qwen_chat
 lib_chat
+
+# wasm build output (web/build.sh)
+web/mote.js
+web/mote.wasm
