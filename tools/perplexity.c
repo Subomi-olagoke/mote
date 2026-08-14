@@ -2,6 +2,10 @@
  *
  *   perplexity <checkpoint> <text_file> [-z tokenizer]
  *
+ * Works with either tokenizer: the legacy SentencePiece-style .bin (default)
+ * or a byte-level BPE .mtok (pass it with -z; detected by its magic), so
+ * Qwen-class models get the same measurement as the TinyStories ones.
+ *
  * Perplexity is exp(average negative log-likelihood per token): feed the model
  * real text, and at each position ask how much probability it put on the token
  * that actually came next. Lower is better. Its whole use here is comparison:
@@ -19,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../src/bpe.h"
 #include "../src/model.h"
 #include "../src/tokenizer.h"
 
@@ -51,8 +56,22 @@ int main(int argc, char **argv)
 
     Transformer t;
     build_transformer(&t, checkpoint);
+
+    /* either tokenizer scheme: a file starting with "MTOK" is byte-level BPE
+     * (Qwen-class models), anything else is the legacy SentencePiece-style one */
+    BPETokenizer *bpe = NULL;
     Tokenizer tk;
-    build_tokenizer(&tk, tok_path, t.config.vocab_size);
+    FILE *tf = fopen(tok_path, "rb");
+    if (!tf) { fprintf(stderr, "can't open %s\n", tok_path); return 1; }
+    char m4[4] = { 0 };
+    if (fread(m4, 1, 4, tf) != 4) { fprintf(stderr, "can't read %s\n", tok_path); return 1; }
+    fclose(tf);
+    if (memcmp(m4, "MTOK", 4) == 0) {
+        bpe = bpe_load(tok_path);
+        if (!bpe) return 1;
+    } else {
+        build_tokenizer(&tk, tok_path, t.config.vocab_size);
+    }
 
     long len;
     char *text = read_file(text_path, &len);
@@ -73,7 +92,10 @@ int main(int argc, char **argv)
         }
 
         int n = 0;
-        encode(&tk, doc, /*bos=*/1, /*eos=*/0, tokens, &n);
+        if (bpe)
+            n = bpe_encode(bpe, doc, tokens, (int)len + 3);
+        else
+            encode(&tk, doc, /*bos=*/1, /*eos=*/0, tokens, &n);
         for (int start = 0; start + 1 < n; start += T) {
             int wlen = n - start < T ? n - start : T;   /* this window's tokens */
             for (int pos = 0; pos + 1 < wlen; pos++) {
@@ -104,7 +126,10 @@ int main(int argc, char **argv)
 
     free(text);
     free(tokens);
-    free_tokenizer(&tk);
+    if (bpe)
+        bpe_free(bpe);
+    else
+        free_tokenizer(&tk);
     free_transformer(&t);
     return 0;
 }

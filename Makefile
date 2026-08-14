@@ -50,8 +50,8 @@ blob2c: tools/blob2c.c
 
 # measure model quality (perplexity), for comparing fp32 vs quantized
 ENGINE := src/model.c src/forward.c src/quant.c src/tokenizer.c src/sampler.c src/parallel.c
-perplexity: tools/perplexity.c $(ENGINE)
-	$(CC) $(CFLAGS) -o $@ tools/perplexity.c $(ENGINE) $(LDLIBS)
+perplexity: tools/perplexity.c $(ENGINE) src/bpe.c
+	$(CC) $(CFLAGS) -o $@ tools/perplexity.c $(ENGINE) src/bpe.c $(LDLIBS)
 
 debug: $(SRC)
 	$(CC) -O1 -g -std=c11 -Wall -Wextra -fsanitize=address,undefined \
