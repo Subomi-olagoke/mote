@@ -47,6 +47,11 @@
 <h1>mote</h1>
 <div id="stats">starting…</div>
 <div id="perf"></div>
+<details id="persona">
+  <summary style="color:var(--dim);font-size:13px;cursor:pointer">persona</summary>
+  <textarea id="system" rows="3" style="width:100%;margin-top:8px;font:inherit;font-size:13px;
+    color:inherit;background:none;border:1px solid var(--line);border-radius:8px;padding:8px"></textarea>
+</details>
 <div id="progress"><div></div></div>
 <div id="chat"></div>
 <form id="form">
@@ -56,7 +61,21 @@
 <script>
 const $ = id => document.getElementById(id);
 const worker = new Worker('worker.js');
-let current = null;   // the streaming assistant bubble
+let current = null;      // the streaming assistant bubble
+let history = [];        // finished turns, replayed for multi-turn context
+let pendingUser = null;  // the user text of the in-flight turn
+
+/* The system prompt is the page's, not the engine's: edit it under "persona"
+ * and it persists in this browser. A deployment can preload its own identity
+ * here without forking the engine. */
+const DEFAULT_SYSTEM =
+  'You are mote, a small language model running entirely on this device. ' +
+  'Answer briefly and directly.';
+$('system').value = localStorage.getItem('mote-system') || DEFAULT_SYSTEM;
+$('system').addEventListener('input', () => {
+  localStorage.setItem('mote-system', $('system').value);
+  history = [];   // a new persona starts a new conversation
+});
 
 function bubble(cls, text) {
   const d = document.createElement('div');
@@ -87,6 +106,11 @@ worker.onmessage = (e) => {
   } else if (m.type === 'done') {
     $('perf').textContent =
       `${m.tokensPerSecond.toFixed(1)} tok/s · ${m.msToFirst.toFixed(0)} ms to first · ${m.tokens} tokens · ${m.seconds.toFixed(1)} s`;
+    if (pendingUser !== null && current) {
+      history.push({ user: pendingUser, assistant: current.textContent });
+      if (history.length > 4) history.shift();   // bound the replayed context
+      pendingUser = null;
+    }
     $('input').disabled = $('send').disabled = false;
     $('input').focus();
     current = null;
@@ -98,10 +122,13 @@ worker.onmessage = (e) => {
 function ask(text) {
   bubble('user', text);
   current = bubble('assistant', '');
+  pendingUser = text;
   $('perf').textContent = 'running…';
   $('input').value = '';
   $('input').disabled = $('send').disabled = true;
-  worker.postMessage({ type: 'generate', text, maxNew: 200 });
+  worker.postMessage({ type: 'generate', text, maxNew: 200,
+                       system: $('system').value.trim() || DEFAULT_SYSTEM,
+                       history });
 }
 
 $('form').addEventListener('submit', (e) => {

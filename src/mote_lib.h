@@ -21,6 +21,10 @@ typedef struct mote mote;
 typedef struct {
     float temperature;          /* 0 = greedy / deterministic          */
     float topp;                 /* nucleus sampling; <=0 or >=1 = off  */
+    float repeat_penalty;       /* >1 discourages recently seen tokens
+                                   (1.1 is gentle); <=1 = off. Small
+                                   models loop verbatim without this,
+                                   especially when greedy.             */
     unsigned long long seed;    /* 0 = leave the current seed          */
     int   max_tokens;           /* 0 = the model's max sequence length */
 } mote_params;

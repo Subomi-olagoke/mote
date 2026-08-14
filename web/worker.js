@@ -58,21 +58,28 @@ async function boot(modelURL, tokURL) {
     postMessage({ type: 'ready', info });
 }
 
-function generate(userText, maxNew) {
-    /* Instruct models (BPE tokenizer) get the ChatML template; the TinyStories
+function generate(userText, maxNew, system, history) {
+    /* Instruct models (BPE tokenizer) get the ChatML template, with the page's
+     * system prompt and recent turns replayed for context; the TinyStories
      * model is a continuation model and takes the text raw. */
-    const prompt = isBPE
-        ? `<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n` +
-          `<|im_start|>user\n${userText}<|im_end|>\n<|im_start|>assistant\n`
-        : userText;
+    let prompt = userText;
+    if (isBPE) {
+        prompt = `<|im_start|>system\n${system}<|im_end|>\n`;
+        for (const t of history || [])
+            prompt += `<|im_start|>user\n${t.user}<|im_end|>\n` +
+                      `<|im_start|>assistant\n${t.assistant}<|im_end|>\n`;
+        prompt += `<|im_start|>user\n${userText}<|im_end|>\n<|im_start|>assistant\n`;
+    }
 
-    /* mote_params: { f32 temperature, f32 topp, u64 seed, i32 max_tokens } */
-    const pPtr = Module._malloc(24);
+    /* mote_params: { f32 temperature, f32 topp, f32 repeat_penalty,
+     *                (4 pad), u64 seed, i32 max_tokens }  = 32 bytes */
+    const pPtr = Module._malloc(32);
     Module.HEAPF32[pPtr >> 2] = 0.0;          // greedy
     Module.HEAPF32[(pPtr >> 2) + 1] = 0.9;
-    Module.HEAP32[(pPtr >> 2) + 2] = 0;       // seed (unused when greedy)
-    Module.HEAP32[(pPtr >> 2) + 3] = 0;
-    Module.HEAP32[(pPtr >> 2) + 4] = maxNew | 0;
+    Module.HEAPF32[(pPtr >> 2) + 2] = 1.15;   // repeat penalty: stops verbatim loops
+    Module.HEAP32[(pPtr >> 2) + 4] = 0;       // seed (unused when greedy)
+    Module.HEAP32[(pPtr >> 2) + 5] = 0;
+    Module.HEAP32[(pPtr >> 2) + 6] = maxNew | 0;
 
     const t0 = performance.now();
     let tokens = 0, tFirst = 0;
@@ -105,6 +112,6 @@ onmessage = (e) => {
     if (m.type === 'boot')
         boot(m.model, m.tokenizer).catch(err => postMessage({ type: 'error', message: String(err) }));
     else if (m.type === 'generate')
-        try { generate(m.text, m.maxNew || 200); }
+        try { generate(m.text, m.maxNew || 200, m.system || 'You are a helpful assistant.', m.history); }
         catch (err) { postMessage({ type: 'error', message: String(err) }); }
 };

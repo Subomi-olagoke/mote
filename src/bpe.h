@@ -30,6 +30,12 @@ const char *bpe_decode(const BPETokenizer *t, int id, int *out_len);
 
 int bpe_eos(const BPETokenizer *t);
 int bpe_vocab_size(const BPETokenizer *t);
+
+/* True if `id` is any of the tokenizer's special tokens (<|im_end|>,
+ * <|endoftext|>, <|im_start|>, ...). A model emitting one mid-generation is
+ * leaving the assistant turn, so generation should stop on all of them, not
+ * just the nominal eos. */
+int bpe_is_special(const BPETokenizer *t, int id);
 void bpe_free(BPETokenizer *t);
 
 #endif /* MOTE_BPE_H */

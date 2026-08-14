@@ -98,6 +98,34 @@ void mote_get_info(const mote *m, mote_info_t *out)
     out->qbits = m->t.qbits;
 }
 
+/* Repetition penalty over a sliding window of recent context. Before sampling,
+ * every token seen in the last REPEAT_WINDOW positions has its logit pushed
+ * away from being picked again (divided if positive, multiplied if negative).
+ * This is what stops a small model from re-answering itself verbatim. */
+#define REPEAT_WINDOW 64
+
+typedef struct {
+    int ids[REPEAT_WINDOW];
+    int n, head;
+} RecentTokens;
+
+static void recent_push(RecentTokens *r, int id)
+{
+    r->ids[r->head] = id;
+    r->head = (r->head + 1) % REPEAT_WINDOW;
+    if (r->n < REPEAT_WINDOW) r->n++;
+}
+
+static void penalize_repeats(const RecentTokens *r, float *logits, float penalty)
+{
+    if (penalty <= 1.0f)
+        return;
+    for (int i = 0; i < r->n; i++) {
+        int id = r->ids[i];
+        logits[id] = logits[id] > 0 ? logits[id] / penalty : logits[id] * penalty;
+    }
+}
+
 int mote_generate(mote *m, const char *prompt, const mote_params *p,
                   int (*on_token)(const char *piece, void *user), void *user)
 {
@@ -109,6 +137,7 @@ int mote_generate(mote *m, const char *prompt, const mote_params *p,
     /* apply this call's sampling settings */
     m->s.temperature = p ? p->temperature : 1.0f;
     m->s.topp        = p ? p->topp : 0.9f;
+    float repeat_penalty = p ? p->repeat_penalty : 0.0f;
     if (p && p->seed)
         m->s.rng = p->seed;
 
@@ -129,15 +158,20 @@ int mote_generate(mote *m, const char *prompt, const mote_params *p,
 
         int token = toks[0], pos = 0, generated = 0;
         char piecebuf[64];
+        RecentTokens recent = { {0}, 0, 0 };
         while (pos < steps) {
+            recent_push(&recent, token);
             float *logits = forward(&m->t, token, pos);
             pos++;
             int next;
             if (pos < n_prompt) {
                 next = toks[pos];            /* still replaying the prompt */
             } else {
+                penalize_repeats(&recent, logits, repeat_penalty);
                 next = sample(&m->s, logits);
-                if (next == eos) break;
+                /* any special token (eos, end-of-turn, a fake new turn) ends
+                 * the assistant's turn */
+                if (next == eos || bpe_is_special(m->bpe, next)) break;
                 int len; const char *piece = bpe_decode(m->bpe, next, &len);
                 if (len >= (int)sizeof(piecebuf)) len = sizeof(piecebuf) - 1;
                 memcpy(piecebuf, piece, len); piecebuf[len] = '\0';
@@ -162,14 +196,18 @@ int mote_generate(mote *m, const char *prompt, const mote_params *p,
 
     int token = prompt_tokens[0];
     int pos = 0, generated = 0;
+    RecentTokens recent = { {0}, 0, 0 };
     while (pos < steps) {
+        recent_push(&recent, token);
         float *logits = forward(&m->t, token, pos);
 
         int next;
-        if (pos < n_prompt - 1)
+        if (pos < n_prompt - 1) {
             next = prompt_tokens[pos + 1];
-        else
+        } else {
+            penalize_repeats(&recent, logits, repeat_penalty);
             next = sample(&m->s, logits);
+        }
         pos++;
 
         if (next == 1)   /* BOS marks the end for these models */

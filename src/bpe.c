@@ -340,6 +340,14 @@ const char *bpe_decode(const BPETokenizer *t, int id, int *out_len)
 }
 
 int bpe_eos(const BPETokenizer *t) { return t->eos_id; }
+
+int bpe_is_special(const BPETokenizer *t, int id)
+{
+    for (int i = 0; i < t->n_special; i++)
+        if (t->specials[i].id == id)
+            return 1;
+    return 0;
+}
 int bpe_vocab_size(const BPETokenizer *t) { return t->vocab_size; }
 
 void bpe_free(BPETokenizer *t)
