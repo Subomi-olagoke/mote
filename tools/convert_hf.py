@@ -132,7 +132,11 @@ def main():
     head_size = D // NH
     kv = NKV * head_size
     seq_len = min(args.seqlen, cfg.get("max_position_embeddings", args.seqlen))
-    rope_theta = float(cfg.get("rope_theta", 10000.0))
+    # newer transformers nests rope_theta under rope_parameters; older configs
+    # keep it top-level. Miss it and the model silently runs on the Llama default.
+    rope_theta = float(cfg.get("rope_theta")
+                       or cfg.get("rope_parameters", {}).get("rope_theta")
+                       or 10000.0)
     rms_eps = float(cfg.get("rms_norm_eps", 1e-5))
     shared = bool(cfg.get("tie_word_embeddings", False))
     gs = args.gs
