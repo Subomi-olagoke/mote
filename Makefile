@@ -19,7 +19,7 @@ BIN     := mote
 $(BIN): $(SRC)
 	$(CC) $(CFLAGS) -o $@ $(SRC) $(LDLIBS)
 
-.PHONY: omp quantize run_ids debug clean
+.PHONY: omp quantize run_ids tok_test qwen_chat debug clean
 omp: $(SRC)
 	$(CC) $(CFLAGS) -fopenmp -o $(BIN) $(SRC) $(LDLIBS)
 
@@ -31,6 +31,14 @@ quantize: tools/quantize.c src/quant.c src/parallel.c
 # architecture against its reference model before its tokenizer is ported to C
 run_ids: tools/run_ids.c src/model.c src/forward.c src/quant.c src/parallel.c
 	$(CC) $(CFLAGS) -Isrc -o $@ tools/run_ids.c src/model.c src/forward.c src/quant.c src/parallel.c $(LDLIBS)
+
+# byte-level BPE tokenizer (Qwen/GPT-2 family): a diff harness and a full offline
+# chat turn (text -> ids -> forward -> ids -> text, entirely in C)
+tok_test: tools/tok_test.c src/bpe.c
+	$(CC) $(CFLAGS) -Isrc -o $@ tools/tok_test.c src/bpe.c $(LDLIBS)
+
+qwen_chat: tools/qwen_chat.c src/model.c src/forward.c src/quant.c src/parallel.c src/bpe.c
+	$(CC) $(CFLAGS) -Isrc -o $@ tools/qwen_chat.c src/model.c src/forward.c src/quant.c src/parallel.c src/bpe.c $(LDLIBS)
 
 # emit a model as a const C array to link into firmware (weights in flash)
 blob2c: tools/blob2c.c
@@ -46,4 +54,4 @@ debug: $(SRC)
 	      -o $(BIN) $(SRC) $(LDLIBS)
 
 clean:
-	rm -f $(BIN) quantize blob2c perplexity run_ids
+	rm -f $(BIN) quantize blob2c perplexity run_ids tok_test qwen_chat
