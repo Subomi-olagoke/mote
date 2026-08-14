@@ -40,6 +40,10 @@ tok_test: tools/tok_test.c src/bpe.c
 qwen_chat: tools/qwen_chat.c src/model.c src/forward.c src/quant.c src/parallel.c src/bpe.c
 	$(CC) $(CFLAGS) -Isrc -o $@ tools/qwen_chat.c src/model.c src/forward.c src/quant.c src/parallel.c src/bpe.c $(LDLIBS)
 
+# same chat turn, but through the mote_lib public API (the surface iOS links against)
+lib_chat: tools/lib_chat.c $(ENGINE) src/bpe.c src/mote_lib.c
+	$(CC) $(CFLAGS) -Isrc -o $@ tools/lib_chat.c $(ENGINE) src/bpe.c src/mote_lib.c $(LDLIBS)
+
 # emit a model as a const C array to link into firmware (weights in flash)
 blob2c: tools/blob2c.c
 	$(CC) $(CFLAGS) -o $@ tools/blob2c.c
@@ -54,4 +58,4 @@ debug: $(SRC)
 	      -o $(BIN) $(SRC) $(LDLIBS)
 
 clean:
-	rm -f $(BIN) quantize blob2c perplexity run_ids tok_test qwen_chat
+	rm -f $(BIN) quantize blob2c perplexity run_ids tok_test qwen_chat lib_chat
