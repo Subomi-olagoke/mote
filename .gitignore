@@ -11,6 +11,7 @@ blob2c
 # model weights and tokenizer (fetch with scripts/download_model.sh)
 models/*.bin
 models/*.mq
+models/*.mtok
 
 # editor / OS noise
 .DS_Store
@@ -18,3 +19,7 @@ models/*.mq
 compile_commands.json
 
 perplexity
+run_ids
+tok_test
+qwen_chat
+lib_chat
