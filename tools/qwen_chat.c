@@ -22,10 +22,14 @@ static int argmax(const float *v, int n)
 int main(int argc, char **argv)
 {
     if (argc < 4) {
-        fprintf(stderr, "usage: %s <model.mq> <tokenizer.mtok> <message> [max_new]\n", argv[0]);
+        fprintf(stderr, "usage: %s <model.mq> <tokenizer.mtok> <message> [max_new] [-s system]\n", argv[0]);
         return 1;
     }
-    int max_new = argc >= 5 ? atoi(argv[4]) : 200;
+    int max_new = argc >= 5 && argv[4][0] != '-' ? atoi(argv[4]) : 200;
+    const char *system = "You are a helpful assistant.";
+    for (int i = 4; i + 1 < argc; i++)
+        if (argv[i][0] == '-' && argv[i][1] == 's')
+            system = argv[i + 1];
 
     Transformer t;
     build_transformer(&t, argv[1]);
@@ -35,8 +39,8 @@ int main(int argc, char **argv)
     /* Qwen ChatML template */
     char prompt[8192];
     snprintf(prompt, sizeof(prompt),
-             "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-             "<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", argv[3]);
+             "<|im_start|>system\n%s<|im_end|>\n"
+             "<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", system, argv[3]);
 
     int cap = 4096, *ids = malloc(cap * sizeof(int));
     int n_prompt = bpe_encode(tk, prompt, ids, cap);
