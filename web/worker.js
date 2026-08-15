@@ -40,6 +40,7 @@ async function fetchIntoHeap(url, label) {
 }
 
 async function boot(modelURL, tokURL) {
+    postMessage({ type: 'status', text: 'starting wasm runtime…' });
     Module = await createMote();
 
     const [tokPtr, tokLen] = await fetchIntoHeap(tokURL, 'tokenizer');
@@ -100,7 +101,9 @@ function generate(userText, maxNew, system, history) {
     const cb = Module.addFunction((piecePtr) => {
         let end = piecePtr;
         while (Module.HEAPU8[end] !== 0) end++;
-        const text = decoder.decode(Module.HEAPU8.subarray(piecePtr, end), { stream: true });
+        /* slice, not subarray: with threads the heap is a SharedArrayBuffer,
+         * and TextDecoder refuses shared views — it needs its own copy */
+        const text = decoder.decode(Module.HEAPU8.slice(piecePtr, end), { stream: true });
         if (++tokens === 1) tFirst = performance.now();
         if (text) postMessage({ type: 'token', text });
         return 1;
@@ -121,6 +124,11 @@ function generate(userText, maxNew, system, history) {
     Module._free(pPtr);
 }
 
+/* With threads on, the wasm runtime spawns its pthread workers by re-loading
+ * THIS script (the only URL it knows). mote.js self-boots when it finds itself
+ * named em-pthread, so those instances must stop right here — claiming
+ * onmessage would sever the thread protocol and hang the runtime. */
+if (globalThis.name !== 'em-pthread')
 onmessage = (e) => {
     const m = e.data;
     if (m.type === 'boot')

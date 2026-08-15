@@ -141,6 +141,9 @@
 <script>
 const $ = id => document.getElementById(id);
 const worker = new Worker('worker.js');
+worker.onerror = (e) => {
+  $('stats').textContent = `worker error: ${e.message || 'see console'} (${e.filename}:${e.lineno})`;
+};
 let current = null;      // the streaming assistant element
 let history = [];        // finished turns, replayed for multi-turn context
 let pendingUser = null;  // the user text of the in-flight turn
@@ -259,6 +262,8 @@ worker.onmessage = (e) => {
     current = null;
     $('input').disabled = $('send').disabled = false;
     $('input').focus();
+  } else if (m.type === 'status') {
+    $('stats').textContent = m.text;
   } else if (m.type === 'embedded') {
     const resolve = embedWaiters.get(m.id);
     if (resolve) { embedWaiters.delete(m.id); resolve(m.vec); }

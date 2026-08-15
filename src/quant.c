@@ -7,6 +7,9 @@
 #if defined(__ARM_NEON)
 #include <arm_neon.h>
 #endif
+#if defined(__wasm_simd128__)
+#include <wasm_simd128.h>
+#endif
 
 #define QMAX 127.0f
 
@@ -55,6 +58,23 @@ static inline int32_t dot_group_i8(const int8_t *a, const int8_t *b, int gs)
         acc = vdotq_s32(acc, vld1q_s8(a + k), vld1q_s8(b + k));
     int32_t sum = vaddvq_s32(acc);
     for (; k < gs; k++)                       /* tail when gs is not a mult of 16 */
+        sum += (int32_t)a[k] * (int32_t)b[k];
+    return sum;
+#elif defined(__wasm_simd128__)
+    /* widen int8 pairs to int16 products, then pairwise-add into int32 lanes */
+    v128_t acc = wasm_i32x4_splat(0);
+    int k = 0;
+    for (; k + 16 <= gs; k += 16) {
+        v128_t va = wasm_v128_load(a + k);
+        v128_t vb = wasm_v128_load(b + k);
+        acc = wasm_i32x4_add(acc, wasm_i32x4_extadd_pairwise_i16x8(
+                                      wasm_i16x8_extmul_low_i8x16(va, vb)));
+        acc = wasm_i32x4_add(acc, wasm_i32x4_extadd_pairwise_i16x8(
+                                      wasm_i16x8_extmul_high_i8x16(va, vb)));
+    }
+    int32_t sum = wasm_i32x4_extract_lane(acc, 0) + wasm_i32x4_extract_lane(acc, 1)
+                + wasm_i32x4_extract_lane(acc, 2) + wasm_i32x4_extract_lane(acc, 3);
+    for (; k < gs; k++)
         sum += (int32_t)a[k] * (int32_t)b[k];
     return sum;
 #else
@@ -180,6 +200,26 @@ static inline int32_t dot_group_q4(const int8_t *a, const uint8_t *wb, int gs)
         acc = vdotq_s32(acc, vld1q_s8(a + half + k), hi);
     }
     sum = vaddvq_s32(acc);
+#elif defined(__wasm_simd128__)
+    /* same split-half unpack as NEON: shifts on i8x16 sign-extend the nibbles */
+    v128_t acc = wasm_i32x4_splat(0);
+    for (; k + 16 <= half; k += 16) {
+        v128_t b  = wasm_v128_load(wb + k);
+        v128_t lo = wasm_i8x16_shr(wasm_i8x16_shl(b, 4), 4);
+        v128_t hi = wasm_i8x16_shr(b, 4);
+        v128_t a0 = wasm_v128_load(a + k);
+        v128_t a1 = wasm_v128_load(a + half + k);
+        acc = wasm_i32x4_add(acc, wasm_i32x4_extadd_pairwise_i16x8(
+                                      wasm_i16x8_extmul_low_i8x16(a0, lo)));
+        acc = wasm_i32x4_add(acc, wasm_i32x4_extadd_pairwise_i16x8(
+                                      wasm_i16x8_extmul_high_i8x16(a0, lo)));
+        acc = wasm_i32x4_add(acc, wasm_i32x4_extadd_pairwise_i16x8(
+                                      wasm_i16x8_extmul_low_i8x16(a1, hi)));
+        acc = wasm_i32x4_add(acc, wasm_i32x4_extadd_pairwise_i16x8(
+                                      wasm_i16x8_extmul_high_i8x16(a1, hi)));
+    }
+    sum = wasm_i32x4_extract_lane(acc, 0) + wasm_i32x4_extract_lane(acc, 1)
+        + wasm_i32x4_extract_lane(acc, 2) + wasm_i32x4_extract_lane(acc, 3);
 #endif
     for (; k < half; k++)                     /* tail, and the whole loop when scalar */
         sum += (int32_t)a[k] * nib_lo(wb[k]) + (int32_t)a[k + half] * nib_hi(wb[k]);

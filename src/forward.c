@@ -19,6 +19,9 @@
 #if defined(__ARM_NEON)
 #include <arm_neon.h>
 #endif
+#if defined(__wasm_simd128__)
+#include <wasm_simd128.h>
+#endif
 
 static void rmsnorm(float *out, const float *x, const float *weight, int size, float eps)
 {
@@ -52,6 +55,17 @@ static inline float dot_f32(const float *a, const float *b, int n)
     for (; i + 4 <= n; i += 4)
         acc = vfmaq_f32(acc, vld1q_f32(a + i), vld1q_f32(b + i));
     float sum = vaddvq_f32(acc);
+    for (; i < n; i++)
+        sum += a[i] * b[i];
+    return sum;
+#elif defined(__wasm_simd128__)
+    v128_t acc = wasm_f32x4_splat(0.0f);
+    int i = 0;
+    for (; i + 4 <= n; i += 4)
+        acc = wasm_f32x4_add(acc, wasm_f32x4_mul(wasm_v128_load(a + i),
+                                                 wasm_v128_load(b + i)));
+    float sum = wasm_f32x4_extract_lane(acc, 0) + wasm_f32x4_extract_lane(acc, 1)
+              + wasm_f32x4_extract_lane(acc, 2) + wasm_f32x4_extract_lane(acc, 3);
     for (; i < n; i++)
         sum += a[i] * b[i];
     return sum;
