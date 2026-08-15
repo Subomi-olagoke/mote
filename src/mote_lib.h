@@ -26,7 +26,8 @@ typedef struct {
                                    models loop verbatim without this,
                                    especially when greedy.             */
     unsigned long long seed;    /* 0 = leave the current seed          */
-    int   max_tokens;           /* 0 = the model's max sequence length */
+    int   max_tokens;           /* cap on NEW tokens generated after the
+                                   prompt; 0 = up to the context limit  */
 } mote_params;
 
 /* A model's shape, for showing what is actually running. */

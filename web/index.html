@@ -106,11 +106,13 @@ worker.onmessage = (e) => {
   } else if (m.type === 'done') {
     $('perf').textContent =
       `${m.tokensPerSecond.toFixed(1)} tok/s · ${m.msToFirst.toFixed(0)} ms to first · ${m.tokens} tokens · ${m.seconds.toFixed(1)} s`;
-    if (pendingUser !== null && current) {
+    if (pendingUser !== null && current && current.textContent.trim()) {
+      // an empty exchange is never worth replaying: a template where the
+      // assistant answers nothing teaches the model to answer nothing
       history.push({ user: pendingUser, assistant: current.textContent });
       if (history.length > 4) history.shift();   // bound the replayed context
-      pendingUser = null;
     }
+    pendingUser = null;
     $('input').disabled = $('send').disabled = false;
     $('input').focus();
     current = null;

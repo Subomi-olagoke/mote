@@ -98,10 +98,16 @@ void mote_get_info(const mote *m, mote_info_t *out)
     out->qbits = m->t.qbits;
 }
 
-/* Repetition penalty over a sliding window of recent context. Before sampling,
- * every token seen in the last REPEAT_WINDOW positions has its logit pushed
- * away from being picked again (divided if positive, multiplied if negative).
- * This is what stops a small model from re-answering itself verbatim. */
+/* Repetition penalty over a sliding window of the tokens generated so far in
+ * THIS response. Before sampling, every token in the window has its logit
+ * pushed away from being picked again (divided if positive, multiplied if
+ * negative). This is what stops a small model from re-answering itself
+ * verbatim.
+ *
+ * Only generated tokens are penalized, never the prompt. Penalizing the prompt
+ * suppresses exactly the words a short answer needs to echo ("what is your
+ * name?" needs "name"), and under greedy decoding the argmax can then fall all
+ * the way through to the end-of-turn token: the model goes silent. */
 #define REPEAT_WINDOW 64
 
 typedef struct {
@@ -141,9 +147,11 @@ int mote_generate(mote *m, const char *prompt, const mote_params *p,
     if (p && p->seed)
         m->s.rng = p->seed;
 
-    int steps = (p && p->max_tokens > 0) ? p->max_tokens : m->t.config.seq_len;
-    if (steps > m->t.config.seq_len)
-        steps = m->t.config.seq_len;
+    /* max_tokens caps NEW tokens; the context budget is prompt + max_tokens,
+     * never past the model's context. (Counting the prompt against the cap is
+     * a trap: once the conversation history outgrows it, the loop spends the
+     * whole budget replaying the prompt and generates nothing at all.) */
+    int max_new = (p && p->max_tokens > 0) ? p->max_tokens : m->t.config.seq_len;
 
     /* ---- byte-level BPE path (Qwen): encode the prompt, replay it, then sample.
      * Only generated tokens are emitted (the prompt is not echoed), and generation
@@ -156,11 +164,14 @@ int mote_generate(mote *m, const char *prompt, const mote_params *p,
         if (n_prompt < 1) { free(toks); return 0; }
         int eos = bpe_eos(m->bpe);
 
+        long steps = (long)n_prompt + max_new;
+        if (steps > m->t.config.seq_len)
+            steps = m->t.config.seq_len;
+
         int token = toks[0], pos = 0, generated = 0;
         char piecebuf[64];
         RecentTokens recent = { {0}, 0, 0 };
         while (pos < steps) {
-            recent_push(&recent, token);
             float *logits = forward(&m->t, token, pos);
             pos++;
             int next;
@@ -169,6 +180,16 @@ int mote_generate(mote *m, const char *prompt, const mote_params *p,
             } else {
                 penalize_repeats(&recent, logits, repeat_penalty);
                 next = sample(&m->s, logits);
+                /* an empty reply is never the right answer: while nothing has
+                 * been said, a sampled turn-ender is suppressed and redrawn.
+                 * (Under greedy this is an exact re-argmax; under temperature,
+                 * sample() has already softmaxed the buffer, so the redraw
+                 * renormalizes — order is preserved, the banned token drops
+                 * to zero, close enough for a guard that rarely fires.) */
+                while (generated == 0 && (next == eos || bpe_is_special(m->bpe, next))) {
+                    logits[next] = -1e30f;
+                    next = sample(&m->s, logits);
+                }
                 /* any special token (eos, end-of-turn, a fake new turn) ends
                  * the assistant's turn */
                 if (next == eos || bpe_is_special(m->bpe, next)) break;
@@ -176,6 +197,7 @@ int mote_generate(mote *m, const char *prompt, const mote_params *p,
                 if (len >= (int)sizeof(piecebuf)) len = sizeof(piecebuf) - 1;
                 memcpy(piecebuf, piece, len); piecebuf[len] = '\0';
                 generated++;
+                recent_push(&recent, next);
                 if (on_token && !on_token(piecebuf, user)) break;
             }
             token = next;
@@ -194,11 +216,14 @@ int mote_generate(mote *m, const char *prompt, const mote_params *p,
         return 0;
     }
 
+    long steps = (long)n_prompt + max_new;
+    if (steps > m->t.config.seq_len)
+        steps = m->t.config.seq_len;
+
     int token = prompt_tokens[0];
     int pos = 0, generated = 0;
     RecentTokens recent = { {0}, 0, 0 };
     while (pos < steps) {
-        recent_push(&recent, token);
         float *logits = forward(&m->t, token, pos);
 
         int next;
@@ -207,6 +232,7 @@ int mote_generate(mote *m, const char *prompt, const mote_params *p,
         } else {
             penalize_repeats(&recent, logits, repeat_penalty);
             next = sample(&m->s, logits);
+            recent_push(&recent, next);
         }
         pos++;
 
