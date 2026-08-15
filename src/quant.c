@@ -115,41 +115,31 @@ void quantize_q4(const QTensor *out, const float *x, long n, int gs)
          * TinyStories this one trick is worth more than any clipping scheme
          * tried (2.642 vs 2.764 perplexity against plain [-7,7] rounding).
          *
-         * On top of that, try a few slightly shrunken scales and keep the one
-         * with the least round-trip error. The gain is marginal (2.640) but it
-         * never hurt, and this runs at conversion time, never on the hot path. */
+         * And nothing fancier than plain round-to-nearest, deliberately. A
+         * clipped-scale search once lived here; it lowered weight RMS error,
+         * changed perplexity by noise (2.640 vs 2.642), and silently broke
+         * quantization-aware-trained checkpoints — QAT teaches the weights to
+         * survive one exact rounding, so the converter must apply that exact
+         * rounding, not a cleverer one. */
         float amax = 0.0f, m = 0.0f;
         for (int i = 0; i < gs; i++) {
             float a = fabsf(xg[i]);
             if (a > amax) { amax = a; m = xg[i]; }
         }
+        float scale = m / -8.0f;
+        out->s[g] = scale;
 
-        float best_scale = 0.0f;
-        float best_err = -1.0f;
         int8_t q[256];               /* gs is small; 256 is far above any real one */
-        int8_t best_q[256];
-        for (int c = 0; c <= 4; c++) {
-            float scale = (m / -8.0f) * (1.0f - 0.05f * c);
-            float err = 0.0f;
-            for (int i = 0; i < gs; i++) {
-                int v = scale != 0.0f ? (int)lroundf(xg[i] / scale) : 0;
-                if (v > 7) v = 7;
-                if (v < -8) v = -8;
-                q[i] = (int8_t)v;
-                float d = xg[i] - v * scale;
-                err += d * d;
-            }
-            if (best_err < 0.0f || err < best_err) {
-                best_err = err;
-                best_scale = scale;
-                for (int i = 0; i < gs; i++) best_q[i] = q[i];
-            }
+        for (int i = 0; i < gs; i++) {
+            int v = scale != 0.0f ? (int)lroundf(xg[i] / scale) : 0;
+            if (v > 7) v = 7;
+            if (v < -8) v = -8;
+            q[i] = (int8_t)v;
         }
 
-        out->s[g] = best_scale;
         uint8_t *b = (uint8_t *)out->q + g * half;
         for (int k = 0; k < half; k++)
-            b[k] = (uint8_t)((best_q[k] & 0x0F) | (best_q[k + half] << 4));
+            b[k] = (uint8_t)((q[k] & 0x0F) | (q[k + half] << 4));
     }
 }
 

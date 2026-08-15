@@ -75,11 +75,12 @@ def quantize_flat(w, gs):
 def quantize_flat_q4(w, gs):
     """int4 in [-8, 7], two per byte, exactly mote's quantize_q4: the scale is
     the group's largest-magnitude weight over -8 (keeping its sign, so that
-    weight lands exactly on -8 and the rest get finer steps), plus a small
-    shrunken-scale search kept only when it lowers round-trip error. Packing
-    matches the runtime: within a group, byte k holds w[k] (low nibble) and
-    w[k + gs/2] (high nibble). Returns (packed bytes, fp32 scales). Chunked so
-    the embedding matrix does not need candidate-count copies of itself."""
+    weight lands exactly on -8 and the rest get finer steps), then plain
+    round-to-nearest — deliberately nothing cleverer, because QAT-trained
+    checkpoints survive exactly the rounding they trained through and a scale
+    search silently breaks them. Packing matches the runtime: within a group,
+    byte k holds w[k] (low nibble) and w[k + gs/2] (high nibble). Returns
+    (packed bytes, fp32 scales). Chunked to bound peak memory."""
     assert gs % 2 == 0
     flat = np.ascontiguousarray(w, dtype=np.float32).ravel()
     assert flat.size % gs == 0, f"group size {gs} does not divide {flat.size}"
@@ -92,21 +93,12 @@ def quantize_flat_q4(w, gs):
     for lo in range(0, len(g), chunk):
         gc = g[lo:lo + chunk]
         m = np.take_along_axis(gc, np.abs(gc).argmax(axis=1)[:, None], axis=1)[:, 0]
-        best_err = np.full(len(gc), np.inf, dtype=np.float32)
-        best_scale = np.zeros(len(gc), dtype=np.float32)
-        best_q = np.zeros(gc.shape, dtype=np.int8)
-        for c in range(5):
-            scale = (m / -8.0) * (1.0 - 0.05 * c)
-            safe = np.where(scale != 0.0, scale, 1.0)
-            q = np.clip(np.rint(gc / safe[:, None]), -8, 7).astype(np.int8)
-            err = ((gc - q * scale[:, None]) ** 2).sum(axis=1)
-            better = err < best_err
-            best_err[better] = err[better]
-            best_scale[better] = scale[better]
-            best_q[better] = q[better]
-        scales[lo:lo + chunk] = best_scale
-        qlo = best_q[:, :half].astype(np.int16)
-        qhi = best_q[:, half:].astype(np.int16)
+        scale = m / -8.0
+        safe = np.where(scale != 0.0, scale, 1.0)
+        q = np.clip(np.rint(gc / safe[:, None]), -8, 7).astype(np.int8)
+        scales[lo:lo + chunk] = scale.astype(np.float32)
+        qlo = q[:, :half].astype(np.int16)
+        qhi = q[:, half:].astype(np.int16)
         packed[lo:lo + chunk] = ((qlo & 0xF) | ((qhi & 0xF) << 4)).astype(np.uint8)
     return packed.tobytes(), scales.tobytes()
 
