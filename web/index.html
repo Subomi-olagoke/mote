@@ -29,11 +29,11 @@
             --line: #242424; --bubble: #1f1f1f; }
   }
   * { box-sizing: border-box; margin: 0; }
-  html, body { height: 100%; }
   body {
     background: var(--bg); color: var(--fg);
     font: 14px/1.65 var(--mono);
-    display: flex; flex-direction: column;
+    /* plain document flow on purpose: a 100%-height flex body breaks
+     * scrolling and sticky positioning in iOS Safari at phone widths */
   }
 
   /* ---- header: pinned to the left edge of the site ---- */
@@ -57,7 +57,7 @@
   #progress > div { height: 100%; width: 0; background: var(--accent); transition: width .15s; }
 
   /* ---- conversation ---- */
-  main { flex: 1; width: 100%; }
+  main { width: 100%; }
   #chat {
     max-width: 680px; margin: 0 auto; padding: 24px 20px 120px;
     display: flex; flex-direction: column; gap: 18px;
@@ -98,7 +98,9 @@
   }
   .form-inner:focus-within { border-color: var(--dim); }
   input {
-    flex: 1; font: 14px var(--mono); color: inherit;
+    /* 16px on purpose: anything smaller makes iOS Safari zoom the whole page
+     * when the field is focused, and it never zooms back */
+    flex: 1; font: 16px var(--mono); color: inherit;
     background: none; border: 0; outline: none; min-width: 0;
   }
   input::placeholder { color: var(--faint); }
@@ -230,7 +232,7 @@ worker.onmessage = (e) => {
     $('progress').remove();
     $('input').disabled = $('send').disabled = false;
     $('input').placeholder = 'Message…';
-    $('input').focus();
+    if (matchMedia('(pointer: fine)').matches) $('input').focus();
     if (new URLSearchParams(location.search).has('auto'))
       ask('What is the capital of Japan?');
   } else if (m.type === 'token') {
@@ -261,7 +263,7 @@ worker.onmessage = (e) => {
     pendingVec = null;
     current = null;
     $('input').disabled = $('send').disabled = false;
-    $('input').focus();
+    if (matchMedia('(pointer: fine)').matches) $('input').focus();
   } else if (m.type === 'status') {
     $('stats').textContent = m.text;
   } else if (m.type === 'embedded') {

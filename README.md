@@ -122,15 +122,17 @@ The engine also compiles to WebAssembly — same C files, one more host:
 
 ```bash
 ./web/build.sh                    # needs emscripten; emits web/mote.js + .wasm
-python3 -m http.server 8000       # serve from the repo root
+python3 web/serve.py 8000         # http.server + the two isolation headers
 # open http://localhost:8000/web/  (append ?auto to run a benchmark prompt)
 ```
 
-The whole engine is ~72KB of wasm; the model download is the only heavy part.
-Measured with the int4 Qwen2.5-0.5B (309 MB): 13.6 tok/s in desktop Chromium
-and 6.5 tok/s in iPhone Safari, single-threaded scalar — no NEON in wasm, no
-threads yet. Slower than the native app, but it is a real chat running from a
-URL with nothing installed.
+The whole engine is ~87KB of wasm; the model download is the only heavy part.
+The matmuls use hand-written wasm SIMD and a pthread worker pool (pthreads are
+web workers; they need the cross-origin-isolation headers `serve.py` sends —
+without them the engine still runs, single-threaded). Measured with the int4
+Qwen2.5-0.5B (309 MB): 48 tok/s in desktop Chromium and 20 tok/s in iPhone
+Safari, up from 13.6 and 6.5 single-threaded. Still shy of the native app, but
+a real conversation from a URL with nothing installed.
 
 ## Roadmap
 
