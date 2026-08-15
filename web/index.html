@@ -67,10 +67,9 @@ let pendingUser = null;  // the user text of the in-flight turn
 
 /* The system prompt is the page's, not the engine's: edit it under "persona"
  * and it persists in this browser. A deployment can preload its own identity
- * here without forking the engine. */
-const DEFAULT_SYSTEM =
-  'You are mote, a small language model running entirely on this device. ' +
-  'Answer briefly and directly.';
+ * here without forking the engine. The default is deliberately generic so it
+ * never fights an identity that is trained into the weights. */
+const DEFAULT_SYSTEM = 'You are a helpful assistant.';
 $('system').value = localStorage.getItem('mote-system') || DEFAULT_SYSTEM;
 $('system').addEventListener('input', () => {
   localStorage.setItem('mote-system', $('system').value);
@@ -139,11 +138,20 @@ $('form').addEventListener('submit', (e) => {
   if (text) ask(text);
 });
 
-/* ?model=<name> picks any .mq in models/ (default qwen05b_q4); ?tok= likewise */
+/* Which model? ?model=<name> picks any .mq in models/ explicitly. Otherwise
+ * models/default.mq is used if the deployment provides one (a symlink or copy
+ * naming its model of choice), falling back to qwen05b_q4. */
 const q = new URLSearchParams(location.search);
-worker.postMessage({ type: 'boot',
-                     model: `../models/${q.get('model') || 'qwen05b_q4'}.mq`,
-                     tokenizer: `../models/${q.get('tok') || 'qwen'}.mtok` });
+(async () => {
+  let model = q.get('model');
+  if (!model) {
+    const probe = await fetch('../models/default.mq', { method: 'HEAD' }).catch(() => null);
+    model = probe && probe.ok ? 'default' : 'qwen05b_q4';
+  }
+  worker.postMessage({ type: 'boot',
+                       model: `../models/${model}.mq`,
+                       tokenizer: `../models/${q.get('tok') || 'qwen'}.mtok` });
+})();
 </script>
 </body>
 </html>
