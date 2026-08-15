@@ -10,6 +10,7 @@ importScripts('mote.js');
 let Module = null;
 let handle = 0;
 let isBPE = false;
+let dim = 0;
 const decoder = new TextDecoder('utf-8');   // stream:true reassembles split UTF-8
 
 /* Fetch a URL directly into the WASM heap. Returns [ptr, length]. */
@@ -55,7 +56,20 @@ async function boot(modelURL, tokURL) {
     const info = { dim: i[0], hidden: i[1], layers: i[2], heads: i[3], kvHeads: i[4],
                    vocab: i[5], ctx: i[6], quantized: i[7], qbits: i[8] };
     Module._free(infoPtr);
+    dim = info.dim;
     postMessage({ type: 'ready', info });
+}
+
+/* Embed a text with the model itself (mean-pooled hidden states, L2-normed).
+ * This is what the page's memory layer stores and retrieves by. */
+function embed(id, text) {
+    const vPtr = Module._malloc(dim * 4);
+    const n = Module.ccall('mote_embed', 'number',
+                           ['number', 'string', 'number'], [handle, text, vPtr]);
+    const vec = n ? Array.from(new Float32Array(Module.HEAPF32.buffer, vPtr, dim))
+                  : null;
+    Module._free(vPtr);
+    postMessage({ type: 'embedded', id, vec });
 }
 
 function generate(userText, maxNew, system, history) {
@@ -114,4 +128,7 @@ onmessage = (e) => {
     else if (m.type === 'generate')
         try { generate(m.text, m.maxNew || 200, m.system || 'You are a helpful assistant.', m.history); }
         catch (err) { postMessage({ type: 'error', message: String(err) }); }
+    else if (m.type === 'embed')
+        try { embed(m.id, m.text); }
+        catch (err) { postMessage({ type: 'embedded', id: m.id, vec: null }); }
 };

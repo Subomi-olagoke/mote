@@ -15,7 +15,7 @@ emcc -O3 -std=c11 -msimd128 \
   -sMODULARIZE=1 -sEXPORT_NAME=createMote \
   -sENVIRONMENT=worker \
   -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=2147483648 \
-  -sEXPORTED_FUNCTIONS=_mote_create,_mote_generate,_mote_free,_mote_get_info,_malloc,_free \
+  -sEXPORTED_FUNCTIONS=_mote_create,_mote_generate,_mote_embed,_mote_free,_mote_get_info,_malloc,_free \
   -sEXPORTED_RUNTIME_METHODS=ccall,cwrap,addFunction,removeFunction,UTF8ToString,HEAPU8,HEAP32,HEAPF32 \
   -sALLOW_TABLE_GROWTH=1
 

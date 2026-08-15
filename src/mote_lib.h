@@ -58,6 +58,14 @@ mote *mote_create_from_files(const char *model_path, const char *tokenizer_path)
 int mote_generate(mote *m, const char *prompt, const mote_params *params,
                   int (*on_token)(const char *piece, void *user), void *user);
 
+/* Embed a text as a single vector: the model's final hidden states, mean-pooled
+ * over the text's tokens and L2-normalized, written to out[dim] (dim from
+ * mote_get_info). The model doubles as its own embedding model, which is what
+ * makes an on-device memory layer possible with nothing extra to ship: store
+ * the vector next to what was said, and later retrieve by dot product.
+ * Returns dim, or 0 on failure. */
+int mote_embed(mote *m, const char *text, float *out);
+
 void mote_free(mote *m);
 
 #ifdef __cplusplus

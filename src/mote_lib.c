@@ -11,6 +11,7 @@
 #include "bpe.h"
 #include "sampler.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -248,6 +249,49 @@ int mote_generate(mote *m, const char *prompt, const mote_params *p,
 
     free(prompt_tokens);
     return generated;
+}
+
+int mote_embed(mote *m, const char *text, float *out)
+{
+    if (!m || !text || !out)
+        return 0;
+    int dim = m->t.config.dim;
+
+    /* tokenize with whichever tokenizer this model carries */
+    int cap = (int)strlen(text) + 8;
+    int *toks = malloc((size_t)cap * sizeof(int));
+    if (!toks)
+        return 0;
+    int n;
+    if (m->is_bpe) {
+        n = bpe_encode(m->bpe, text, toks, cap);
+    } else {
+        n = 0;
+        encode(&m->tk, text, /*bos=*/1, /*eos=*/0, toks, &n);
+    }
+    if (n < 1) { free(toks); return 0; }
+    if (n > m->t.config.seq_len) n = m->t.config.seq_len;
+
+    /* run the text through and mean-pool the final hidden state at every
+     * position. forward() leaves that state (post final norm) in state.x. */
+    for (int i = 0; i < dim; i++)
+        out[i] = 0.0f;
+    for (int pos = 0; pos < n; pos++) {
+        forward(&m->t, toks[pos], pos);
+        const float *h = m->t.state.x;
+        for (int i = 0; i < dim; i++)
+            out[i] += h[i];
+    }
+    free(toks);
+
+    /* L2-normalize so retrieval is a plain dot product */
+    float ss = 0.0f;
+    for (int i = 0; i < dim; i++)
+        ss += out[i] * out[i];
+    float inv = ss > 0.0f ? 1.0f / sqrtf(ss) : 0.0f;
+    for (int i = 0; i < dim; i++)
+        out[i] *= inv;
+    return dim;
 }
 
 void mote_free(mote *m)

@@ -47,6 +47,12 @@
   }
   .wordmark { font: 600 17px var(--mono); letter-spacing: -0.02em; }
   #stats { font: 12px var(--mono); color: var(--dim); flex: 1; min-height: 18px; }
+  #clear {
+    width: auto; height: auto; border-radius: 6px; background: none;
+    color: var(--dim); font: 12px var(--mono); padding: 2px 8px;
+    border: 1px solid var(--line); cursor: pointer;
+  }
+  #clear:hover { color: var(--fg); border-color: var(--dim); }
   #progress { height: 2px; background: none; }
   #progress > div { height: 100%; width: 0; background: var(--accent); transition: width .15s; }
 
@@ -111,6 +117,7 @@
   <div class="head-inner">
     <span class="wordmark">mote</span>
     <span id="stats">starting…</span>
+    <button id="clear" type="button" title="new conversation (memory is kept)">clear</button>
   </div>
   <div id="progress"><div></div></div>
 </header>
@@ -137,12 +144,59 @@ const worker = new Worker('worker.js');
 let current = null;      // the streaming assistant element
 let history = [];        // finished turns, replayed for multi-turn context
 let pendingUser = null;  // the user text of the in-flight turn
+let pendingVec = null;   // its embedding, kept to store the memory afterwards
 
 /* The system prompt is deliberately generic: identity belongs in the weights,
  * not the page. Power users can still override it for this browser with
  * localStorage.setItem('mote-system', '...') in the console. */
 const DEFAULT_SYSTEM = 'You are a helpful assistant.';
 const systemPrompt = () => localStorage.getItem('mote-system') || DEFAULT_SYSTEM;
+
+/* ---- memory ----
+ * Long-term memory is past exchanges, each stored with an embedding computed
+ * by the model itself (mote_embed). Every new question is embedded, the
+ * closest old exchanges are injected into the system prompt as notes, and the
+ * model decides what is relevant — it is trained to use notes that matter and
+ * ignore ones that don't. Lives in this browser's localStorage; wipe it with
+ * localStorage.removeItem('mote-memory'). The note format is a contract with
+ * the training data: change one and you must change the other. */
+const MEM_KEY = 'mote-memory', CHAT_KEY = 'mote-chat', MEM_CAP = 100;
+let memory = JSON.parse(localStorage.getItem(MEM_KEY) || '[]');
+
+let embedSeq = 0;
+const embedWaiters = new Map();
+function embedText(text) {
+  return new Promise(resolve => {
+    const id = ++embedSeq;
+    embedWaiters.set(id, resolve);
+    worker.postMessage({ type: 'embed', id, text });
+  });
+}
+
+function recallNotes(vec) {
+  if (!vec || !memory.length) return [];
+  const inContext = new Set(history.map(t => t.user));
+  return memory
+    .filter(e => !inContext.has(e.q))
+    .map(e => ({ e, sim: e.vec.reduce((s, v, i) => s + v * vec[i], 0) }))
+    .sort((a, b) => b.sim - a.sim)
+    .slice(0, 2)
+    .map(x => x.e);
+}
+
+const clip = (s, n) => s.length > n ? s.slice(0, n - 1) + '…' : s;
+function systemWithNotes(notes) {
+  if (!notes.length) return systemPrompt();
+  const lines = notes.map(e => `- "${clip(e.q, 160)}" -> "${clip(e.a, 160)}"`).join('\n');
+  return `${systemPrompt()}\n\nNotes from earlier conversations with this user:\n${lines}`;
+}
+
+function remember(q, a, vec) {
+  if (!vec || !a.trim()) return;
+  memory.push({ q, a, vec: vec.map(v => Math.round(v * 1000) / 1000) });
+  if (memory.length > MEM_CAP) memory.shift();
+  localStorage.setItem(MEM_KEY, JSON.stringify(memory));
+}
 
 function bubble(cls, text) {
   $('empty').style.display = 'none';
@@ -196,19 +250,25 @@ worker.onmessage = (e) => {
         // assistant answers nothing teaches the model to answer nothing
         history.push({ user: pendingUser, assistant: current.textContent });
         if (history.length > 4) history.shift();   // bound the replayed context
+        localStorage.setItem(CHAT_KEY, JSON.stringify(history));
+        remember(pendingUser, current.textContent, pendingVec);
       }
     }
     pendingUser = null;
+    pendingVec = null;
     current = null;
     $('input').disabled = $('send').disabled = false;
     $('input').focus();
+  } else if (m.type === 'embedded') {
+    const resolve = embedWaiters.get(m.id);
+    if (resolve) { embedWaiters.delete(m.id); resolve(m.vec); }
   } else if (m.type === 'error') {
     $('stats').textContent = 'error: ' + m.message;
     if (current) current.classList.remove('streaming');
   }
 };
 
-function ask(text) {
+async function ask(text) {
   bubble('user', text);
   current = bubble('assistant', '');
   current.classList.add('streaming');
@@ -216,8 +276,9 @@ function ask(text) {
   $('input').value = '';
   $('input').disabled = $('send').disabled = true;
   scrollTo(0, document.body.scrollHeight);
+  pendingVec = await embedText(text);            // one prefill pass; also stored
   worker.postMessage({ type: 'generate', text, maxNew: 200,
-                       system: systemPrompt(), history });
+                       system: systemWithNotes(recallNotes(pendingVec)), history });
 }
 
 $('form').addEventListener('submit', (e) => {
@@ -225,6 +286,20 @@ $('form').addEventListener('submit', (e) => {
   const text = $('input').value.trim();
   if (text && !$('send').disabled) ask(text);
 });
+
+/* new conversation; long-term memory is kept (that is its whole point) */
+$('clear').addEventListener('click', () => {
+  history = [];
+  localStorage.removeItem(CHAT_KEY);
+  $('chat').innerHTML = '';
+  $('empty').style.display = '';
+});
+
+/* restore the last conversation so a reload is not amnesia */
+for (const t of (history = JSON.parse(localStorage.getItem(CHAT_KEY) || '[]'))) {
+  bubble('user', t.user);
+  bubble('assistant', t.assistant);
+}
 
 const q = new URLSearchParams(location.search);
 (async () => {
