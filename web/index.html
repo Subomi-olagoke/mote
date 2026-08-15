@@ -185,7 +185,7 @@ function recallNotes(vec) {
     .filter(e => !inContext.has(e.q))
     .map(e => ({ e, sim: e.vec.reduce((s, v, i) => s + v * vec[i], 0) }))
     .sort((a, b) => b.sim - a.sim)
-    .slice(0, 2)
+    .slice(0, 3)
     .map(x => x.e);
 }
 
@@ -196,8 +196,15 @@ function systemWithNotes(notes) {
   return `${systemPrompt()}\n\nNotes from earlier conversations with this user:\n${lines}`;
 }
 
-function remember(q, a, vec) {
-  if (!vec || !a.trim()) return;
+async function remember(q, a) {
+  if (!a.trim()) return;
+  /* the stored embedding covers question AND answer: the fact the user will
+   * ask for later often lives in the reply, not in what they said */
+  const vec = await embedText(clip(q, 300) + '\n' + clip(a, 300));
+  if (!vec) return;
+  /* near-duplicate exchanges (repeated tests, retried questions) would crowd
+   * out real memories — keep the newest, drop the near-twin */
+  memory = memory.filter(e => e.vec.reduce((s, v, i) => s + v * vec[i], 0) < 0.98);
   memory.push({ q, a, vec: vec.map(v => Math.round(v * 1000) / 1000) });
   if (memory.length > MEM_CAP) memory.shift();
   localStorage.setItem(MEM_KEY, JSON.stringify(memory));
@@ -256,7 +263,7 @@ worker.onmessage = (e) => {
         history.push({ user: pendingUser, assistant: current.textContent });
         if (history.length > 4) history.shift();   // bound the replayed context
         localStorage.setItem(CHAT_KEY, JSON.stringify(history));
-        remember(pendingUser, current.textContent, pendingVec);
+        remember(pendingUser, current.textContent);   // async; embeds q + a
       }
     }
     pendingUser = null;
